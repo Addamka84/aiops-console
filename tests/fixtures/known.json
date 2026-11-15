@@ -1,0 +1,61 @@
+{
+  "_comment": "Test fixture (sanitised copy of a real configuration).",
+  "context": [
+    "homesrv: a small PC with an Intel iGPU and NO NVIDIA/AMD GPU (Docker host)."
+  ],
+  "noise": [
+    "^\\$\\{LOG_HOST\\} \\|",
+    "^homesrv3-(dbg|final) \\|",
+    "error-like lines \\|",
+    "systemd-sysv-generator",
+    "compatibility logic is deprecated|lacks a native systemd unit file",
+    "Standard output type syslog is obsolete",
+    "apparmor=",
+    "Deprecated parameter 'intr'",
+    "callbacks suppressed",
+    "docker-.*\\.scope: Consumed",
+    "containerd\\.service: (Found left-over process|This usually indicates unclean)",
+    "MIME type is not supported: image/heic",
+    "(?i)card-mod",
+    "crond .*publish_metrics\\.sh",
+    "odhcpd .*ra_lifetime",
+    "\\| hostapd \\|",
+    "DHCPv.*No Addresses Available",
+    "smartctl (failed|reports device asleep)",
+    "Unknown username \"__MAIN_USER__\"",
+    "iwlwifi .*WRT",
+    "sm-notify .*DNS resolution",
+    "Reload requested from client",
+    "a2dp-playback\\.service|bluealsa\\.service",
+    "netifd .*udhcpc: lease",
+    "Failed to determine whether the interface is managed",
+    "i915 .*\\[drm\\] \\*ERROR\\* Atomic update failure",
+    "workqueue: i915_hpd_poll_init_work",
+    "\\.(service|scope|slice): Consumed .* CPU time",
+    "\\| logstack-test \\|",
+    "\\| anacron \\|",
+    "missing _msg field",
+    "udhcpc: sending renew",
+    "\\| systemd \\| (\\d+x \\| )?Reexecuting",
+    "\\| thermald \\|",
+    "\\| rpc\\.statd \\|",
+    "org\\.freedesktop\\.PackageKit",
+    "\\| wud \\|",
+    "\\| (radarr|lidarr|sonarr|prowlarr) \\| error code: (<N>|\\d+)",
+    "\\| aiops \\| .*nem elerheto \\("
+  ],
+  "known_issues": [
+    {
+      "id": "homenas2-sdb-smart",
+      "match": "smartd .*(Raw_Read_Error_Rate|FAILED SMART self-check)",
+      "match_output": "smart|sdb|HD105SI|Raw_Read",
+      "note": "homenas2: disk sdb (Samsung HD105SI) has a failed SMART check. Data already copied; replacement pending."
+    },
+    {
+      "id": "homesrv-pm2",
+      "match": "pm.*-root\\.service",
+      "match_output": "pm2",
+      "note": "homesrv: pm2-root.service fails to start (stale leftover, harmless)."
+    }
+  ]
+}

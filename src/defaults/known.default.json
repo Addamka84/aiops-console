@@ -1,0 +1,8 @@
+{
+  "_comment": "Generic starting configuration. 'context' = facts about your lab that the model should know; 'noise' = regexes (matched against 'host | ident | message', numbers collapsed to <N>) removed BEFORE the model sees the logs; 'known_issues' = acknowledged problems (match = input regex, match_output = regex for the model's output).",
+  "context": [
+    "Describe your lab here: hosts, what runs on them, what is normal. Example: server1 is a small PC running Docker (Frigate, Uptime Kuma, the monitoring stack)."
+  ],
+  "noise": [],
+  "known_issues": []
+}
