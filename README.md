@@ -1,7 +1,7 @@
 # aiops-console
 
 A small service that turns your logs into a daily digest and incident triage using a **local LLM** (Ollama),
-with a **REST API** (and soon a web UI) to configure it. Built for a home lab: [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) for logs,
+with a **web UI** and a **REST API** to configure it. Built for a home lab: [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) for logs,
 vmalert + Alertmanager for alerts, Ollama for the model, a Home Assistant webhook for notifications.
 
 ```
@@ -25,6 +25,17 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
 See [`docker-compose.example.yml`](docker-compose.example.yml). Required: `VL_URL`, `OLLAMA_URLS`, `CONSOLE_ADMIN_TOKEN`.
 The first start seeds the config from `KNOWN_FILE` (if set and valid) or the built-in generic default; after that the store in `/data` is the source of truth.
 
+Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens (kept for the browser tab only):
+
+| Page | What it does |
+|---|---|
+| Status | LLM endpoints (up/down, backoff), queue, next digest, last digest / incident with issues; admin: run a digest now, send a test notification |
+| Noise & known issues | Edit lab context, noise regexes and known issues. **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
+| Settings | All editable settings with their defaults; only differences are stored |
+| Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
+| History | Revisions with a diff against the current state and one-click rollback; audit log (admin) |
+
+The UI is three static files (no build step, no external resources, strict CSP; every value is rendered as text).
 Interactive API docs: `http://<host>:8095/docs`.
 
 ## API (all under `/api/v1`, `Authorization: Bearer <token>`)
@@ -39,6 +50,7 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /proposals[/{id}]` (read), `POST /proposals/{id}/approve?force=` / `reject` (admin) | review (with diff); stale proposals need `force` |
 | `POST /jobs/digest` / `POST /jobs/notify-test` (admin) | run a digest now / send a test notification |
 | `GET /audit` (admin) | who changed what |
+| `GET /whoami` (read) | role of the token; `POST /config/{key}/diff`, `GET /config/{key}/revisions/{id}/diff` (read): diff previews |
 
 `known` patch keys: `add_noise`, `remove_noise`, `add_known_issues`, `remove_known_issue_ids`, `set_context`.
 Settings are validated (types, ranges) - see `GET /config/settings` for the list. Not editable over the API: `VL_URL`, `HA_WEBHOOK_URL`, tokens.

@@ -21,6 +21,7 @@ import settings
 from store import StoreError
 
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
+UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 
 class Actor:
@@ -109,16 +110,35 @@ def create_app(rt, tokens=None):
     def health():
         return {"ok": True}
 
-    def basic_status():
-        return {k: aiops.STATUS[k] for k in ("started", "pending", "endpoints")}
+    # A UI statikus fajlok (nem tartalmaznak adatot; az adat az API-bol jon tokennel). Szigoru CSP: csak sajat forras.
+    ui_types = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8", "index.html": "text/html; charset=utf-8"}
+    ui_headers = {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+                                   "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "no-cache",
+    }
+
+    def ui_file(name):
+        with open(os.path.join(UI_DIR, name), "rb") as f:
+            return Response(f.read(), media_type=ui_types[name], headers=ui_headers)
 
     @app.get("/", include_in_schema=False)
     def root():
-        return basic_status()
+        return ui_file("index.html")
+
+    @app.get("/ui/{name}", include_in_schema=False)
+    def ui_static(name: str):
+        if name not in ui_types or name == "index.html":
+            raise HTTPException(404, "not found")
+        return ui_file(name)
 
     @app.get("/last", include_in_schema=False)
     def last():
         return {"last_digest": aiops.STATUS.get("last_digest"), "last_incident": aiops.STATUS.get("last_incident")}
+
+    @app.get("/api/v1/whoami")
+    def whoami(who: Actor = Depends(read)):
+        return {"role": who.role, "actor": who.name}
 
     # ------------------------------------------------------------ allapot
     @app.get("/api/v1/status")
@@ -169,6 +189,24 @@ def create_app(rt, tokens=None):
             return store.revision(key, rid)
         except StoreError as e:
             fail(e)
+
+    @app.post("/api/v1/config/{key}/diff")
+    def diff_config(key: str, body: ConfigPut, _: Actor = Depends(read)):
+        """Mentes elotti elonezet: mi valtozna a jelenlegihez kepest (nem ir semmit, nem validal)."""
+        check_key(key)
+        cur = (store.current(key) or {"content": {}})["content"]
+        return {"changed": cur != body.content, "diff": unified(cur, body.content)}
+
+    @app.get("/api/v1/config/{key}/revisions/{rid}/diff")
+    def revision_diff(key: str, rid: int, _: Actor = Depends(read)):
+        """Mit valtoztatna a visszaallitas: a jelenlegi -> a kivalasztott verzio."""
+        check_key(key)
+        try:
+            old = store.revision(key, rid)["content"]
+        except StoreError as e:
+            fail(e)
+        cur = (store.current(key) or {"content": {}})["content"]
+        return {"changed": cur != old, "diff": unified(cur, old)}
 
     @app.post("/api/v1/config/{key}/rollback/{rid}")
     def rollback(key: str, rid: int, who: Actor = Depends(admin)):

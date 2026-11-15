@@ -1,0 +1,437 @@
+'use strict';
+/* aiops console UI: vanilla JS, no build step, no external resources. Everything is built with DOM nodes and text nodes (never parsed as markup). */
+
+// ---------------------------------------------------------------- helpers
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (['value', 'checked', 'disabled', 'selected', 'readOnly'].includes(k)) e[k] = v;
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return e;
+}
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const storage = {
+  get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* ignore */ } },
+  del(k) { try { sessionStorage.removeItem(k); } catch (e) { /* ignore */ } },
+};
+const fmtTime = (iso) => { if (!iso) return '-'; const d = new Date(iso); return isNaN(d) ? String(iso) : d.toLocaleString(); };
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const S = {
+  token: storage.get('token') || '', role: null, actor: '', tab: storage.get('tab') || 'status',
+  known: null, base: null, draft: null, test: null, testHours: 24, testError: '', diff: null, comment: '',
+  timer: null, proposalsPending: 0,
+};
+let toastTimer = null;
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: Object.assign({ Authorization: 'Bearer ' + S.token }, body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const txt = await r.text();
+  let data = null;
+  try { data = JSON.parse(txt); } catch (e) { /* not JSON */ }
+  if (!r.ok) {
+    const err = new Error(errText(r.status, data, txt));
+    err.status = r.status;
+    throw err;
+  }
+  return data;
+}
+function errText(status, data, txt) {
+  const d = data && data.detail;
+  if (d && d.errors) return d.errors.join('\n');
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) return d.map((x) => (x.loc ? x.loc.join('.') + ': ' : '') + x.msg).join('\n');
+  return 'HTTP ' + status + (txt ? ': ' + txt.slice(0, 200) : '');
+}
+function toast(msg, bad) {
+  let box = document.getElementById('toast');
+  if (!box) { box = h('div', { id: 'toast' }); document.body.append(box); }
+  const t = h('div', { class: bad ? 'bad' : '' }, msg);
+  box.append(t);
+  setTimeout(() => t.remove(), bad ? 7000 : 3500);
+}
+function sevBadge(s) { return h('span', { class: 'badge sev-' + (s || 'info') }, s || 'info'); }
+function stateBadge(s) { return h('span', { class: 'badge b-' + s }, s); }
+function diffEl(text) {
+  const pre = h('pre', { class: 'diff' });
+  if (!text) { pre.append('(no changes)'); return pre; }
+  for (const line of text.split('\n')) {
+    const cls = line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : '';
+    pre.append(h('span', { class: cls }, line + '\n'));
+  }
+  return pre;
+}
+const isAdmin = () => S.role === 'admin';
+
+// ---------------------------------------------------------------- shell
+const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
+
+function renderShell(content) {
+  const app = document.getElementById('app');
+  app.replaceChildren(
+    h('header', {}, h('div', { class: 'bar' },
+      h('span', { class: 'brand' }, 'aiops console'),
+      h('nav', {}, TABS.map(([id, label]) => h('button', { class: S.tab === id ? 'on' : '', onclick: () => go(id) },
+        label, id === 'proposals' && S.proposalsPending ? ' (' + S.proposalsPending + ')' : ''))),
+      h('span', { class: 'badge ' + (isAdmin() ? 'b-up' : 'b-unknown'), title: S.actor }, S.role),
+      h('button', { class: 'btn', onclick: signOut }, 'Sign out'))),
+    h('main', {}, content));
+}
+function go(tab) {
+  S.tab = tab; storage.set('tab', tab);
+  clearInterval(S.timer); S.timer = null;
+  render();
+}
+function signOut() { storage.del('token'); S.token = ''; S.role = null; clearInterval(S.timer); render(); }
+
+async function render() {
+  if (S.tab !== 'status' && S.timer) { clearInterval(S.timer); S.timer = null; }
+  if (!S.token) return renderLogin();
+  if (!S.role) {
+    try {
+      const w = await api('GET', '/api/v1/whoami');
+      S.role = w.role; S.actor = w.actor;
+    } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
+  }
+  refreshPendingCount();
+  const page = { status: pageStatus, known: pageKnown, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  try { await page(); } catch (e) {
+    if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
+    renderShell(h('div', { class: 'err' }, e.message));
+  }
+}
+async function refreshPendingCount() {
+  try { S.proposalsPending = (await api('GET', '/api/v1/proposals?status=pending')).length; } catch (e) { /* ignore */ }
+}
+
+function renderLogin(msg) {
+  const inp = h('input', { type: 'password', class: 'mono grow', placeholder: 'API token (read or admin)', autocomplete: 'off' });
+  const go_ = async () => {
+    S.token = inp.value.trim(); S.role = null;
+    storage.set('token', S.token);
+    render();
+  };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') go_(); });
+  document.getElementById('app').replaceChildren(h('div', { class: 'login panel' },
+    h('h2', {}, 'aiops console'),
+    h('p', { class: 'muted' }, 'Enter your API token. It is kept for this browser tab only.'),
+    msg ? h('div', { class: 'err' }, msg) : null,
+    h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: go_ }, 'Sign in'))));
+  inp.focus();
+}
+
+// ---------------------------------------------------------------- status
+function issueList(issues) {
+  if (!issues || !issues.length) return h('p', { class: 'muted' }, 'No issues reported.');
+  return issues.map((i) => h('div', { class: 'issue' },
+    h('div', { class: 'row' }, sevBadge(i.severity), h('strong', {}, i.title || i.id), h('span', { class: 'muted small' }, [i.status, (i.hosts || []).join(', ')].filter(Boolean).join(' · '))),
+    h('details', {}, h('summary', { class: 'muted small' }, 'Details'),
+      h('dl', { class: 'kv small' },
+        h('dt', {}, 'Evidence'), h('dd', {}, i.evidence || '-'),
+        h('dt', {}, 'Likely cause'), h('dd', {}, i.likely_cause || '-'),
+        h('dt', {}, 'Suggested action'), h('dd', {}, i.suggested_action || '-')))));
+}
+function resultCard(title, r) {
+  if (!r) return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, title), h('p', { class: 'muted' }, 'Nothing yet.'));
+  return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, title),
+    h('p', { class: 'muted small' }, [r.model, r.endpoint, r.window || r.alert].filter(Boolean).join(' · ')),
+    h('p', {}, r.summary || ''), issueList(r.issues));
+}
+async function pageStatus() {
+  const s = await api('GET', '/api/v1/status');
+  const hoursInp = h('input', { type: 'number', min: 1, max: 168, value: 24, style: 'width:80px' });
+  const busy = { v: false };
+  const act = (fn) => async (ev) => {
+    if (busy.v) return; busy.v = true; ev.target.disabled = true;
+    try { await fn(); } catch (e) { toast(e.message, true); }
+    busy.v = false; ev.target.disabled = false;
+  };
+  renderShell([
+    h('div', { class: 'grid' },
+      h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'LLM endpoints'),
+        (s.endpoints && s.endpoints.length ? s.endpoints : [{ url: '(not probed yet)', state: 'unknown' }]).map((e) => h('div', { class: 'row' },
+          stateBadge(e.state), h('span', { class: 'mono small' }, e.url),
+          e.state === 'down' ? h('span', { class: 'muted small' }, 'retry in ' + e.retry_in_s + ' s, fails ' + e.fails) : null))),
+      h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Service'),
+        h('dl', { class: 'kv' },
+          h('dt', {}, 'Started'), h('dd', {}, fmtTime(s.started)),
+          h('dt', {}, 'Queue'), h('dd', {}, s.pending + ' job(s) waiting'),
+          h('dt', {}, 'Next digest'), h('dd', {}, fmtTime(s.next_digest_utc)),
+          h('dt', {}, 'Notifications'), h('dd', {}, s.notify_configured ? 'configured' : 'not configured (HA_WEBHOOK_URL)'),
+          h('dt', {}, 'Last notification'), h('dd', {}, s.last_notify ? (s.last_notify.ok ? 'ok' : 'FAILED') + ' · ' + s.last_notify.kind + ' · ' + fmtTime(s.last_notify.at) : '-'),
+          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', settings #' + s.config.settings_rev))),
+      h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Actions'),
+        isAdmin() ? h('div', { class: 'row' },
+          h('span', { class: 'muted small' }, 'Digest over the last'), hoursInp, h('span', { class: 'muted small' }, 'h'),
+          h('button', { class: 'btn primary', onclick: act(async () => { await api('POST', '/api/v1/jobs/digest', { hours: Number(hoursInp.value) }); toast('Digest queued'); }) }, 'Run now'))
+          : h('p', { class: 'muted small' }, 'Admin token required.'),
+        isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
+          h('button', { class: 'btn', disabled: !s.notify_configured, onclick: act(async () => { await api('POST', '/api/v1/jobs/notify-test'); toast('Test notification queued'); }) }, 'Send test notification')) : null)),
+    resultCard('Last digest', s.last_digest),
+    resultCard('Last incident', s.last_incident),
+  ]);
+  if (!S.timer) {
+    S.timer = setInterval(() => {
+      const a = document.activeElement;
+      if (document.hidden || S.tab !== 'status' || (a && ['INPUT', 'SELECT', 'TEXTAREA'].includes(a.tagName))) return;  // do not steal focus while typing
+      pageStatus().catch(() => {});
+    }, 10000);
+  }
+}
+
+// ---------------------------------------------------------------- noise & known issues
+const norm = (d) => Object.assign({}, d, { context: d.context || [], noise: d.noise || [], known_issues: d.known_issues || [] });
+const TS_PREFIX = /^(?:\[?<N>-<N>-<N>[ T]<N>:<N>:<N>(?:[.,]<N>)?(?:\+<N>:<N>|Z)?\]?\s*)+/;
+
+function ruleFromLine(text) {
+  const parts = text.split(' | ');
+  const ident = (parts[1] || '').trim();
+  let msg = parts.slice(2).join(' | ').replace(TS_PREFIX, '').trim();
+  if (msg.length > 60) msg = msg.slice(0, 60).replace(/\s+\S*$/, '');  // cut at a word boundary
+  // The line still contains the timestamp between "ident |" and the message text, hence ".*".
+  return '\\| ' + esc(ident) + ' \\| .*' + esc(msg);
+}
+async function loadKnown() {
+  S.known = await api('GET', '/api/v1/config/known');
+  S.base = norm(S.known.content); S.draft = clone(S.base);
+  S.test = null; S.testError = ''; S.diff = null; S.comment = '';
+}
+async function runTest() {
+  S.testError = '';
+  try { S.test = await api('POST', '/api/v1/test/known', { hours: S.testHours, content: S.draft }); } catch (e) { S.test = null; S.testError = e.message; }
+  S.diff = null;
+  draw();
+}
+async function showDiff() {
+  try { S.diff = (await api('POST', '/api/v1/config/known/diff', { content: S.draft })).diff; } catch (e) { toast(e.message, true); }
+  draw();
+}
+async function submit(kind) {
+  const comment = S.comment.trim();
+  if (!comment) { toast('Add a short comment (what and why).', true); return; }
+  try {
+    if (kind === 'save') {
+      const r = await api('PUT', '/api/v1/config/known', { content: S.draft, comment });
+      toast(r.changed ? 'Saved as revision ' + r.rev + '; active now.' : 'No changes.');
+      await loadKnown();
+    } else {
+      const r = await api('POST', '/api/v1/proposals', { key: 'known', content: S.draft, comment });
+      toast('Proposal #' + r.id + ' created.');
+      S.comment = '';
+      refreshPendingCount();
+    }
+  } catch (e) { S.testError = e.message; toast('Rejected: see the message above', true); }
+  draw();
+}
+const pageKnown = async () => { if (!S.draft) await loadKnown(); draw(); };
+
+function draw() {
+  const d = S.draft, t = S.test;
+  const dirty = !same(norm(d), S.base);
+  const noiseStat = (i) => (t && t.noise[i] ? t.noise[i] : null);
+  const issueStat = (id) => (t ? t.known.find((k) => k.id === id) : null);
+  const touched = () => { S.test = null; S.diff = null; };
+
+  const ctxRows = d.context.map((c, i) => h('div', { class: 'row top' },
+    h('textarea', { class: 'grow', rows: 2, value: c, oninput: (e) => { d.context[i] = e.target.value; } }),
+    h('button', { class: 'icon', title: 'Remove', onclick: () => { d.context.splice(i, 1); draw(); } }, '×')));
+
+  const noiseRows = d.noise.map((rx, i) => {
+    const st = noiseStat(i);
+    return h('tr', { class: st && st.patterns === 0 ? 'unused' : '' },
+      h('td', { class: 'num muted' }, i + 1),
+      h('td', {}, h('input', { class: 'mono', style: 'width:100%', value: rx, oninput: (e) => { d.noise[i] = e.target.value; touched(); } }),
+        st && st.samples.length ? h('details', {}, h('summary', { class: 'muted small' }, 'sample lines'), st.samples.map((x) => h('div', { class: 'mono small muted' }, x))) : null),
+      h('td', { class: 'num small' }, st ? (st.patterns ? st.patterns + ' patterns / ' + st.lines + ' lines' : 'no match') : '-'),
+      h('td', {}, h('button', { class: 'icon', title: 'Remove', onclick: () => { d.noise.splice(i, 1); touched(); draw(); } }, '×')));
+  });
+  const addNoise = (rx) => { d.noise.push(rx || ''); touched(); draw(); if (!rx) { const ins = document.querySelectorAll('#noise-table input'); ins[ins.length - 1].focus(); } else runTest(); };
+
+  const issueCards = d.known_issues.map((k, i) => {
+    const st = issueStat(k.id);
+    const f = (key, label, mono, rows) => h('div', { style: 'margin-bottom:6px' }, h('div', { class: 'muted small' }, label),
+      rows ? h('textarea', { rows, value: k[key] || '', oninput: (e) => { k[key] = e.target.value; touched(); } })
+        : h('input', { class: mono ? 'mono' : '', style: 'width:100%', value: k[key] || '', oninput: (e) => { if (e.target.value) k[key] = e.target.value; else delete k[key]; touched(); } }));
+    return h('div', { class: 'panel', style: 'background:var(--bg)' },
+      h('div', { class: 'row' }, h('strong', { class: 'grow' }, k.id || '(new)'),
+        st ? h('span', { class: 'small muted' }, st.patterns ? st.patterns + ' patterns / ' + st.lines + ' lines' : 'no match') : null,
+        h('button', { class: 'icon', title: 'Remove', onclick: () => { d.known_issues.splice(i, 1); touched(); draw(); } }, '×')),
+      f('id', 'ID (unique)', true), f('note', 'Note (shown to the model as "already acknowledged")', false, 2),
+      f('match', 'Input regex: log line "host | ident | message" that marks this issue', true),
+      f('match_output', 'Output regex (optional): drops model issues whose title/evidence matches; defaults to the input regex', true));
+  });
+
+  const keptRows = t ? t.kept_top.map((k) => h('tr', {}, h('td', { class: 'num' }, k.hits + '×'), h('td', { class: 'mono small' }, k.text),
+    h('td', {}, h('button', { class: 'btn small', title: 'Add a noise rule from this line', onclick: () => addNoise(ruleFromLine(k.text)) }, '+ noise')))) : [];
+
+  const testPanel = h('div', { class: 'panel' },
+    h('h3', { style: 'margin-top:0' }, 'Dry run against the live logs'),
+    h('div', { class: 'row' },
+      h('span', { class: 'muted small' }, 'Window'),
+      h('select', { onchange: (e) => { S.testHours = Number(e.target.value); } }, [6, 24, 72, 168].map((n) => h('option', { value: n, selected: n === S.testHours }, n + ' h'))),
+      h('button', { class: 'btn primary', onclick: runTest }, 'Run test'),
+      h('span', { class: 'muted small' }, 'Uses your current (unsaved) edits; nothing is changed.')),
+    S.testError ? h('div', { class: 'err' }, S.testError) : null,
+    t ? h('div', {},
+      h('p', {}, h('strong', {}, t.rows + ' log patterns'), ': noise rules remove ' + t.noise_patterns + ' (' + t.noise_lines + ' lines), known issues ' + t.known_patterns + ', ',
+        h('strong', {}, t.kept_patterns + ' reach the model'), ' (saved config: ' + t.baseline.kept_patterns + ').',
+        t.unused_noise.length ? ' ' + t.unused_noise.length + ' of ' + t.noise.length + ' noise rules matched nothing in this window.' : ''),
+      keptRows.length ? h('div', {}, h('h3', {}, 'Still reaching the model (most frequent)'),
+        h('table', {}, h('tbody', {}, keptRows))) : null) : null);
+
+  const bar = h('div', { class: 'savebar' },
+    S.diff !== null ? diffEl(S.diff) : null,
+    h('div', { class: 'row', style: S.diff !== null ? 'margin-top:8px' : '' },
+      h('input', { class: 'grow', placeholder: 'Comment: what and why', value: S.comment, oninput: (e) => { S.comment = e.target.value; } }),
+      h('button', { class: 'btn', disabled: !dirty, onclick: showDiff }, 'Preview diff'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => { S.draft = clone(S.base); S.test = null; S.diff = null; draw(); } }, 'Discard edits'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => submit('propose') }, 'Propose'),
+      isAdmin() ? h('button', { class: 'btn primary', disabled: !dirty, onclick: () => submit('save') }, 'Save') : null),
+    h('div', { class: 'muted small', style: 'margin-top:6px' },
+      'Revision #' + S.known.id + (dirty ? ' · unsaved changes' : '') + (isAdmin() ? '' : ' · read-only token: use Propose, an admin approves.')));
+
+  renderShell([
+    h('h2', {}, 'Noise & known issues'),
+    h('p', { class: 'muted' }, 'Rules run before the model sees the logs. Lines are matched as "host | ident | message" with numbers collapsed to <N>.'),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Lab context (facts given to the model)'), ctxRows,
+      h('button', { class: 'btn', onclick: () => { d.context.push(''); draw(); } }, '+ Add fact')),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Noise rules (' + d.noise.length + ')'),
+      h('table', { id: 'noise-table' }, h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'Regex'), h('th', {}, 'Last test'), h('th', {}))), h('tbody', {}, noiseRows)),
+      h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn', onclick: () => addNoise('') }, '+ Add noise rule'))),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Known issues (' + d.known_issues.length + ')'), issueCards,
+      h('button', { class: 'btn', onclick: () => { d.known_issues.push({ id: '', note: '', match: '' }); touched(); draw(); } }, '+ Add known issue')),
+    testPanel, bar,
+  ]);
+}
+
+// ---------------------------------------------------------------- settings
+async function pageSettings() {
+  const r = await api('GET', '/api/v1/config/settings');
+  const spec = r.spec, stored = r.content || {};
+  const inputs = {};
+  const val = (s) => (s.key in stored ? stored[s.key] : s.default);
+  const toText = (v) => (Array.isArray(v) ? v.join('\n') : String(v));
+  const parse = (s) => {
+    const raw = inputs[s.key].value;
+    if (s.type === 'int') return raw.trim() === '' ? raw : Number(raw);
+    if (s.type === 'urls') return raw.split('\n').map((x) => x.trim()).filter(Boolean);
+    return raw.trim();
+  };
+  const overrides = () => {
+    const o = {};
+    for (const s of spec) { const v = parse(s); if (!same(v, s.default)) o[s.key] = v; }
+    return o;
+  };
+  const status = h('span', { class: 'muted small' });
+  const upd = () => { const dirty = !same(overrides(), stored); status.textContent = dirty ? 'Unsaved changes' : 'No changes'; saveBtn.disabled = proposeBtn.disabled = resetBtn2.disabled = !dirty; };
+  const saveBtn = h('button', { class: 'btn primary', onclick: () => send('save') }, 'Save');
+  const proposeBtn = h('button', { class: 'btn', onclick: () => send('propose') }, 'Propose');
+  const resetBtn2 = h('button', { class: 'btn', onclick: () => { for (const s of spec) inputs[s.key].value = toText(val(s)); upd(); } }, 'Discard edits');
+  const comment = h('input', { class: 'grow', placeholder: 'Comment: what and why' });
+  const errBox = h('div');
+  const send = async (kind) => {
+    errBox.replaceChildren();
+    if (!comment.value.trim()) { toast('Add a short comment (what and why).', true); return; }
+    try {
+      if (kind === 'save') { const x = await api('PUT', '/api/v1/config/settings', { content: overrides(), comment: comment.value }); toast(x.changed ? 'Saved as revision ' + x.rev + '; active now.' : 'No changes.'); render(); }
+      else { const x = await api('POST', '/api/v1/proposals', { key: 'settings', content: overrides(), comment: comment.value }); toast('Proposal #' + x.id + ' created.'); refreshPendingCount(); }
+    } catch (e) { errBox.replaceChildren(h('div', { class: 'err' }, e.message)); }
+  };
+  const field = (s) => {
+    let el;
+    if (s.type === 'choice') el = h('select', {}, s.choices.map((c) => h('option', { value: c, selected: c === val(s) }, c)));
+    else if (s.type === 'urls') el = h('textarea', { class: 'mono', rows: 2, value: toText(val(s)) });
+    else el = h('input', Object.assign({ class: s.type === 'int' ? '' : 'mono', value: toText(val(s)), style: 'width:100%' }, s.type === 'int' ? { type: 'number', min: s.min, max: s.max } : {}));
+    el.addEventListener('input', upd); el.addEventListener('change', upd);
+    inputs[s.key] = el;
+    return el;
+  };
+  renderShell([
+    h('h2', {}, 'Settings'),
+    h('p', { class: 'muted' }, 'Overrides on top of the container\'s environment defaults. A value equal to the default is not stored. Secrets (webhook URL, tokens) are never editable here.'),
+    h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Setting'), h('th', {}, 'Value'), h('th', {}, 'Default'))),
+      h('tbody', {}, spec.map((s) => h('tr', {},
+        h('td', {}, h('div', { class: 'mono small' }, s.key), h('div', { class: 'muted small' }, s.desc)),
+        h('td', { style: 'min-width:230px' }, field(s)),
+        h('td', { class: 'mono small muted' }, toText(s.default), s.key in stored ? h('div', {}, h('span', { class: 'badge sev-medium' }, 'overridden')) : null)))))),
+    errBox,
+    h('div', { class: 'savebar' }, h('div', { class: 'row' }, comment, resetBtn2, proposeBtn, isAdmin() ? saveBtn : null),
+      h('div', { class: 'row', style: 'margin-top:6px' }, status, h('span', { class: 'muted small' }, 'Revision #' + (r.id || 0) + (isAdmin() ? '' : ' · read-only token: use Propose')))),
+  ]);
+  upd();
+}
+
+// ---------------------------------------------------------------- proposals
+async function pageProposals() {
+  const all = await api('GET', '/api/v1/proposals');
+  S.proposalsPending = all.filter((p) => p.status === 'pending').length;
+  const decide = async (id, what, force) => {
+    try { await api('POST', '/api/v1/proposals/' + id + '/' + what + (force ? '?force=true' : '')); toast('Proposal #' + id + ' ' + what + 'd.'); S.draft = null; render(); }
+    catch (e) { toast(e.message, true); }
+  };
+  const card = (p) => {
+    const body = h('div', { class: 'muted small' }, 'Loading diff...');
+    const det = h('details', { ontoggle: async () => {
+      if (!det.open || det.dataset.loaded) return; det.dataset.loaded = '1';
+      try { const x = await api('GET', '/api/v1/proposals/' + p.id); body.replaceChildren(diffEl(x.diff)); } catch (e) { body.textContent = e.message; }
+    } }, h('summary', {}, 'Show changes'), body);
+    return h('div', { class: 'panel' },
+      h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status), p.stale ? h('span', { class: 'badge b-stale', title: 'The configuration changed after this proposal was made' }, 'stale') : null,
+        h('span', { class: 'muted small' }, p.author + ' · ' + fmtTime(p.ts) + (p.decided_by ? ' · ' + p.status + ' by ' + p.decided_by : ''))),
+      h('p', {}, p.comment), det,
+      p.status === 'pending' && isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn primary', disabled: p.stale, onclick: () => decide(p.id, 'approve') }, 'Approve'),
+        p.stale ? h('button', { class: 'btn', onclick: () => confirm('Apply anyway? This overwrites newer changes.') && decide(p.id, 'approve', true) }, 'Approve anyway') : null,
+        h('button', { class: 'btn danger', onclick: () => decide(p.id, 'reject') }, 'Reject')) : null);
+  };
+  renderShell([h('h2', {}, 'Proposals'),
+    !isAdmin() ? h('div', { class: 'note' }, 'You are signed in with a read token: you can create proposals, an admin approves them.') : null,
+    all.length ? all.map(card) : h('p', { class: 'muted' }, 'No proposals yet.')]);
+}
+
+// ---------------------------------------------------------------- history & audit
+async function pageHistory() {
+  const key = S.historyKey || 'known';
+  const revs = await api('GET', '/api/v1/config/' + key + '/revisions');
+  let audit = null;
+  if (isAdmin()) audit = await api('GET', '/api/v1/audit?limit=100');
+  const rollback = async (id) => {
+    if (!confirm('Roll back ' + key + ' to revision ' + id + '? The current state stays in the history.')) return;
+    try { const r = await api('POST', '/api/v1/config/' + key + '/rollback/' + id); toast('Rolled back as revision ' + r.rev + '.'); S.draft = null; render(); } catch (e) { toast(e.message, true); }
+  };
+  const revRow = (r, i) => {
+    const body = h('div', { class: 'muted small' }, 'Loading...');
+    const det = h('details', { ontoggle: async () => {
+      if (!det.open || det.dataset.loaded) return; det.dataset.loaded = '1';
+      try { const x = await api('GET', '/api/v1/config/' + key + '/revisions/' + r.id + '/diff'); body.replaceChildren(h('div', { class: 'muted small' }, 'Changes a rollback to this revision would make:'), diffEl(x.diff)); } catch (e) { body.textContent = e.message; }
+    } }, h('summary', { class: 'muted small' }, 'Compare with current'), body);
+    return h('tr', {}, h('td', { class: 'num' }, '#' + r.id + (i === 0 ? ' (current)' : '')), h('td', { class: 'small' }, fmtTime(r.ts)), h('td', { class: 'small' }, r.author),
+      h('td', {}, r.comment || '-', i > 0 ? det : null),
+      h('td', {}, i > 0 && isAdmin() ? h('button', { class: 'btn', onclick: () => rollback(r.id) }, 'Roll back') : null));
+  };
+  renderShell([
+    h('h2', {}, 'History'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+    h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
+    audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
+      h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),
+        h('tbody', {}, audit.map((a) => h('tr', {}, h('td', { class: 'small' }, fmtTime(a.ts)), h('td', { class: 'small' }, a.actor), h('td', { class: 'mono small' }, a.action), h('td', { class: 'small' }, a.detail)))))) : null,
+  ]);
+}
+
+render();

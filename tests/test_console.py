@@ -255,10 +255,46 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/audit", headers=self.R).status_code, 403)
         self.assertEqual(self.c.get("/api/v1/audit", headers=self.A).status_code, 200)
         self.assertEqual(self.c.put("/api/v1/config/known", json={"content": {}}, headers=self.R).status_code, 403)
-        # nyitott vegpontok (health, regi allapot-JSON)
+        # nyitott vegpontok (health, a UI statikus fajljai, regi /last JSON)
         self.assertEqual(self.c.get("/api/v1/health").status_code, 200)
-        self.assertIn("endpoints", self.c.get("/").json())
         self.assertIn("last_digest", self.c.get("/last").json())
+
+    def test_ui_static_files_and_headers(self):
+        r = self.c.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/html", r.headers["content-type"])
+        self.assertIn("script-src 'self'", r.headers["content-security-policy"])
+        self.assertIn("frame-ancestors 'none'", r.headers["content-security-policy"])
+        self.assertEqual(r.headers["x-content-type-options"], "nosniff")
+        self.assertIn("/ui/app.js", r.text)
+        js = self.c.get("/ui/app.js")
+        self.assertEqual((js.status_code, js.headers["content-type"].split(";")[0]), (200, "text/javascript"))
+        self.assertEqual(self.c.get("/ui/app.css").status_code, 200)
+        for bad in ("/ui/index.html", "/ui/console.py", "/ui/../console.py", "/ui/%2e%2e/console.py"):
+            self.assertEqual(self.c.get(bad).status_code, 404, bad)
+        # a UI-fajlok nem tartalmaznak titkot / nem hasznalnak innerHTML-t (XSS-vedelem: csak textContent / DOM-epites)
+        self.assertNotIn("innerHTML", js.text)
+        self.assertNotIn("eval(", js.text)
+
+    def test_whoami_and_diff_endpoints(self):
+        self.assertEqual(self.c.get("/api/v1/whoami", headers=self.R | {"X-Actor": "bob"}).json(), {"role": "read", "actor": "read:bob"})
+        self.assertEqual(self.c.get("/api/v1/whoami", headers=self.A).json()["role"], "admin")
+        self.assertEqual(self.c.get("/api/v1/whoami").status_code, 401)
+        doc = copy.deepcopy(FIXTURE)
+        doc["noise"].append("zzz-new")
+        d = self.c.post("/api/v1/config/known/diff", json={"content": doc}, headers=self.R).json()
+        self.assertTrue(d["changed"])
+        self.assertIn('+  "zzz-new"', d["diff"])
+        same_doc = self.c.post("/api/v1/config/known/diff", json={"content": FIXTURE}, headers=self.R).json()
+        self.assertEqual((same_doc["changed"], same_doc["diff"]), (False, ""))
+        # visszaallitas-elonezet: jelenlegi -> regi verzio
+        first = self.c.get("/api/v1/config/known/revisions", headers=self.R).json()[0]["id"]
+        self.c.put("/api/v1/config/known", json={"content": doc, "comment": "add"}, headers=self.A)
+        rd = self.c.get(f"/api/v1/config/known/revisions/{first}/diff", headers=self.R).json()
+        self.assertTrue(rd["changed"])
+        self.assertIn('-  "zzz-new"', rd["diff"])
+        self.assertEqual(self.c.get("/api/v1/config/known/revisions/9999/diff", headers=self.R).status_code, 404)
+        self.assertEqual(self.c.post("/api/v1/config/nope/diff", json={"content": {}}, headers=self.R).status_code, 404)
 
     def test_no_tokens_configured_is_503(self):
         c = TestClient(console.create_app(self.rt, tokens={"read": "", "admin": ""}))
