@@ -64,7 +64,9 @@ CFG = {
     "NOTIFY_MIN_SEVERITY": os.environ.get("NOTIFY_MIN_SEVERITY", "medium"),  # incidensekre: ettol a sulyossagtol kuld
     "NOTIFY_DIGEST": os.environ.get("NOTIFY_DIGEST", "always"),               # always | issues | off
     "NOTIFY_TIMEOUT": _env_int("NOTIFY_TIMEOUT", 5),                          # mp / kiserlet (2 kiserlet)
+    "HEARTBEAT_S": _env_int("HEARTBEAT_S", 300),   # mp: eletjel a tarba (pipeline:ai kind:heartbeat); 0 = kikapcsolva
 }
+__version__ = "1.2.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -655,7 +657,7 @@ def to_events(result):
 
 # ---------------------------------------------------------------- allapot, utemezes
 
-STATUS = {"started": iso(utcnow()), "pending": 0, "last_digest": None, "last_incident": None, "endpoints": []}
+STATUS = {"version": __version__, "started": iso(utcnow()), "pending": 0, "last_digest": None, "last_incident": None, "endpoints": []}
 
 
 def load_state():
@@ -773,6 +775,21 @@ def notify_test():
                               "issue_count": 0, "all_clear": True, "model": CFG["MODEL"]})
 
 
+def send_heartbeat(pool, state):
+    """Eletjel a tarba: a vmalert 'AIOpsDown' / 'AIOpsLLMUnavailable' szabalya ezt figyeli. SOHA nem dob kivetelt.
+
+    Az 'llm_up' a vegpont aktualis (visszalepest tiszteletben tarto) probajabol jon, igy az ures sor mellett is friss."""
+    try:
+        up = pool.pick() is not None
+        vl_insert([{
+            "_time": iso(utcnow()), "pipeline": "ai", "kind": "heartbeat",
+            "_msg": f"[aiops heartbeat] llm_up={str(up).lower()} pending={len(state['pending'])}",
+            "llm_up": "true" if up else "false", "pending": str(len(state["pending"])), "version": __version__,
+        }])
+    except Exception as e:
+        log(f"eletjel irasa sikertelen: {type(e).__name__}: {e}", key="heartbeat")
+
+
 def handle_commands(state):
     """A konzolbol erkezo parancsok feldolgozasa (a hatterszal sajat allapotat csak o modositja)."""
     while True:
@@ -797,6 +814,7 @@ def service_loop(get_known):
     state = load_state()
     log(f"aiops indul: modell {CFG['MODEL']}, vegpontok {CFG['OLLAMA_URLS']}, osszefoglalo {CFG['DIGEST_UTC']} UTC")
     last_poll = 0.0
+    last_hb = None
     while True:
         try:
             known = get_known()
@@ -804,6 +822,9 @@ def service_loop(get_known):
             if key != pool_key:
                 pool, pool_key = EndpointPool(CFG["OLLAMA_URLS"], CFG["MODEL"]), key
             now = utcnow()
+            if CFG["HEARTBEAT_S"] and (last_hb is None or time.monotonic() - last_hb >= CFG["HEARTBEAT_S"]):
+                last_hb = time.monotonic()
+                send_heartbeat(pool, state)
             handle_commands(state)
             schedule_digest(state, now)
             if time.monotonic() - last_poll >= CFG["INCIDENT_POLL_S"]:

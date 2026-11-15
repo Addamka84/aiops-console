@@ -30,6 +30,7 @@ SPEC = {
     "NOTIFY_MIN_SEVERITY": {"type": "choice", "choices": aiops.SEVERITIES, "desc": "Incident notifications start from this severity."},
     "NOTIFY_DIGEST": {"type": "choice", "choices": CHOICES_NOTIFY_DIGEST, "desc": "Daily digest notification: always | issues (only if there are issues) | off."},
     "NOTIFY_TIMEOUT": {"type": "int", "min": 1, "max": 30, "desc": "Per-attempt notification timeout (s)."},
+    "HEARTBEAT_S": {"type": "int", "min": 0, "max": 3600, "desc": "Heartbeat event interval (s); alert rules watch it. 0 = off."},
 }
 
 _URL_RX = re.compile(r"^https?://[^/\s]+$")

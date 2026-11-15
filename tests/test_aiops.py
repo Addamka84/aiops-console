@@ -87,6 +87,41 @@ def make_vl(rows_by_marker, inserts):
     return H
 
 
+class HeartbeatTests(unittest.TestCase):
+    def _run(self, llm_up=True, vl_up=True):
+        inserts = []
+        vl, vl_url = start(make_vl({}, inserts))
+        ol, ol_url = start(make_ollama())
+        old = aiops.CFG["VL_URL"]
+        try:
+            aiops.CFG["VL_URL"] = vl_url if vl_up else "http://127.0.0.1:9"
+            pool = aiops.EndpointPool([ol_url] if llm_up else ["http://127.0.0.1:9"], "qwen3.5:9b")
+            aiops.send_heartbeat(pool, {"pending": [1, 2]})
+        finally:
+            aiops.CFG["VL_URL"] = old
+            vl.shutdown()
+            ol.shutdown()
+        return inserts
+
+    def test_heartbeat_event_when_llm_up(self):
+        (ev,) = self._run()
+        self.assertEqual((ev["pipeline"], ev["kind"], ev["llm_up"], ev["pending"]), ("ai", "heartbeat", "true", "2"))
+        self.assertEqual(ev["version"], aiops.__version__)
+        self.assertIn("[aiops heartbeat]", ev["_msg"])
+
+    def test_heartbeat_is_sent_when_llm_is_down(self):
+        (ev,) = self._run(llm_up=False)  # a heartbeat az aiops EL, nem az LLM allapota; az llm_up kulon mezo
+        self.assertEqual((ev["kind"], ev["llm_up"]), ("heartbeat", "false"))
+
+    def test_heartbeat_never_raises_when_store_is_down(self):
+        self.assertEqual(self._run(vl_up=False), [])
+
+    def test_heartbeat_setting_is_editable_and_zero_disables(self):
+        import settings
+        self.assertEqual(settings.validate({"HEARTBEAT_S": 0})[1], [])
+        self.assertTrue(settings.validate({"HEARTBEAT_S": 99999})[1])
+
+
 class KnownTests(unittest.TestCase):
     def setUp(self):
         self.k = aiops.Known()

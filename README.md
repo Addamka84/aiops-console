@@ -19,6 +19,8 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
 - **Changes can be proposed**: a read-only token can *propose* a change (a small patch); an admin approves it (with a diff) before it applies.
 - **Dry run before you save**: `POST /api/v1/test/known` replays a candidate rule set against the live logs and shows what each rule would remove
   and what would still reach the model.
+- **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
+  so an alert rule can notice a dead service or an LLM that has been unreachable for a day. `GET /api/v1/health` is open for external monitors.
 - **Secrets stay in environment variables** (tokens, webhook URL); they are never written to the config store and the API never returns them.
 
 ## Run
