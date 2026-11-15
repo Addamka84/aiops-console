@@ -19,6 +19,8 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
 - **Changes can be proposed**: a read-only token can *propose* a change (a small patch); an admin approves it (with a diff) before it applies.
 - **Dry run before you save**: `POST /api/v1/test/known` replays a candidate rule set against the live logs and shows what each rule would remove
   and what would still reach the model.
+- **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
+  Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
   so an alert rule can notice a dead service or an LLM that has been unreachable for a day. `GET /api/v1/health` is open for external monitors.
 - **Secrets stay in environment variables** (tokens, webhook URL); they are never written to the config store and the API never returns them.
@@ -32,7 +34,7 @@ Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens
 | Page | What it does |
 |---|---|
 | Status | LLM endpoints (up/down, backoff), queue, next digest, last digest / incident with issues; admin: run a digest now, send a test notification |
-| Noise & known issues | Edit lab context, noise regexes and known issues. **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
+| Noise & known issues | Edit lab context, noise regexes and known issues; **snooze** a line from the dry-run list (immediately for admin, as a proposal for a read token). **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
 | Settings | All editable settings with their defaults; only differences are stored |
 | Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
 | History | Revisions with a diff against the current state and one-click rollback; audit log (admin) |
@@ -50,11 +52,15 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `POST /test/known` (read) | dry run of `{"patch": {...}}` or `{"content": {...}}` against the last `hours` of logs |
 | `POST /proposals` (read) | propose a change: `{"key":"known","comment":"...","patch":{"add_noise":["regex"]}}` |
 | `GET /proposals[/{id}]` (read), `POST /proposals/{id}/approve?force=` / `reject` (admin) | review (with diff); stale proposals need `force` |
+| `GET /snoozes` (read) | temporary mutes with `active` and `remaining_s` |
+| `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |
+| `DELETE /snoozes/{id}` (admin) | un-mute / remove an expired entry |
 | `POST /jobs/digest` / `POST /jobs/notify-test` (admin) | run a digest now / send a test notification |
 | `GET /audit` (admin) | who changed what |
 | `GET /whoami` (read) | role of the token; `POST /config/{key}/diff`, `GET /config/{key}/revisions/{id}/diff` (read): diff previews |
 
-`known` patch keys: `add_noise`, `remove_noise`, `add_known_issues`, `remove_known_issue_ids`, `set_context`.
+`known` patch keys: `add_noise`, `remove_noise`, `add_known_issues`, `remove_known_issue_ids`, `set_context`,
+`add_snoozes` (`regex` + exactly one of `hours` / `until`, optional `note`), `remove_snooze_ids`, `prune_expired_snoozes`.
 Settings are validated (types, ranges) - see `GET /config/settings` for the list. Not editable over the API: `VL_URL`, `HA_WEBHOOK_URL`, tokens.
 
 ```bash

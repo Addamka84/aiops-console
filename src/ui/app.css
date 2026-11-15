@@ -67,6 +67,7 @@ th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line
 th { color: var(--muted); font-weight: 600; font-size: 13px; }
 td.num { text-align: right; white-space: nowrap; }
 tr.unused td { opacity: .6; }
+.nowrap { white-space: nowrap; }
 .err { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad); border-radius: 8px; padding: 8px 12px; margin: 8px 0; white-space: pre-wrap; }
 .note { background: var(--info-bg); color: var(--info); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .savebar { position: sticky; bottom: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-top: 14px; box-shadow: 0 -4px 14px rgba(0,0,0,.08); }

@@ -29,7 +29,7 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const S = {
   token: storage.get('token') || '', role: null, actor: '', tab: storage.get('tab') || 'status',
-  known: null, base: null, draft: null, test: null, testHours: 24, testError: '', diff: null, comment: '',
+  snoozes: [], snoozeHours: 24, known: null, base: null, draft: null, test: null, testHours: 24, testError: '', diff: null, comment: '',
   timer: null, proposalsPending: 0,
 };
 let toastTimer = null;
@@ -209,6 +209,34 @@ async function loadKnown() {
   S.known = await api('GET', '/api/v1/config/known');
   S.base = norm(S.known.content); S.draft = clone(S.base);
   S.test = null; S.testError = ''; S.diff = null; S.comment = '';
+  S.snoozes = await api('GET', '/api/v1/snoozes');
+}
+// Snoozes are changed through their own endpoints (immediately, without touching unsaved edits of the rest).
+async function refreshSnoozes() {
+  const k = await api('GET', '/api/v1/config/known');
+  S.known = k;
+  for (const doc of [S.base, S.draft]) { if (k.content.snoozes && k.content.snoozes.length) doc.snoozes = clone(k.content.snoozes); else delete doc.snoozes; }
+  S.snoozes = await api('GET', '/api/v1/snoozes');
+}
+const fmtLeft = (s) => (s <= 0 ? 'expired' : s < 5400 ? Math.max(1, Math.round(s / 60)) + ' min left' : s < 172800 ? Math.round(s / 3600) + ' h left' : Math.round(s / 86400) + ' days left');
+async function doSnooze(regex, note) {
+  const hours = S.snoozeHours;
+  try {
+    if (isAdmin()) {
+      await api('POST', '/api/v1/snoozes', { regex, hours, note });
+      await refreshSnoozes();
+      toast('Snoozed for ' + hours + ' h; active now.');
+    } else {
+      const r = await api('POST', '/api/v1/proposals', { key: 'known', comment: 'snooze for ' + hours + ' h' + (note ? ': ' + note : ''), patch: { add_snoozes: [{ regex, hours, note }] } });
+      toast('Proposal #' + r.id + ' created.');
+      refreshPendingCount();
+    }
+  } catch (e) { toast(e.message, true); }
+  if (S.test) await runTest(); else draw();
+}
+async function dropSnooze(id) {
+  try { await api('DELETE', '/api/v1/snoozes/' + encodeURIComponent(id)); await refreshSnoozes(); } catch (e) { toast(e.message, true); }
+  draw();
 }
 async function runTest() {
   S.testError = '';
@@ -276,7 +304,21 @@ function draw() {
   });
 
   const keptRows = t ? t.kept_top.map((k) => h('tr', {}, h('td', { class: 'num' }, k.hits + '×'), h('td', { class: 'mono small' }, k.text),
-    h('td', {}, h('button', { class: 'btn small', title: 'Add a noise rule from this line', onclick: () => addNoise(ruleFromLine(k.text)) }, '+ noise')))) : [];
+    h('td', { class: 'nowrap' },
+      h('button', { class: 'btn small', title: 'Add a permanent noise rule from this line', onclick: () => addNoise(ruleFromLine(k.text)) }, '+ noise'), ' ',
+      h('button', { class: 'btn small', title: 'Mute this line for ' + S.snoozeHours + ' h (then it comes back by itself)', onclick: () => doSnooze(ruleFromLine(k.text), '') }, 'snooze ' + S.snoozeHours + ' h')))) : [];
+
+  const snoozeRows = S.snoozes.map((s) => h('tr', { class: s.active ? '' : 'unused' },
+    h('td', {}, h('div', { class: 'mono small' }, s.regex), s.note ? h('div', { class: 'muted small' }, s.note) : null),
+    h('td', { class: 'num small nowrap' }, s.active ? fmtLeft(s.remaining_s) : 'expired', h('div', { class: 'muted' }, s.until)),
+    h('td', {}, isAdmin() ? h('button', { class: 'icon', title: 'Remove', onclick: () => dropSnooze(s.id) }, '×') : null)));
+  const snoozePanel = h('div', { class: 'panel' },
+    h('h3', { style: 'margin-top:0' }, 'Snoozed (' + S.snoozes.filter((s) => s.active).length + ' active)'),
+    h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Snooze length for the buttons in the dry run below'),
+      h('select', { onchange: (e) => { S.snoozeHours = Number(e.target.value); draw(); } },
+        [[1, '1 h'], [6, '6 h'], [24, '1 day'], [72, '3 days'], [168, '7 days'], [720, '30 days']].map(([n, l]) => h('option', { value: n, selected: n === S.snoozeHours }, l)))),
+    snoozeRows.length ? h('table', {}, h('tbody', {}, snoozeRows)) : h('p', { class: 'muted small' }, 'Nothing is snoozed. A snooze mutes a line temporarily; it expires by itself and is not a permanent rule.'),
+    isAdmin() ? null : h('p', { class: 'muted small' }, 'Read-only token: a snooze becomes a proposal.'));
 
   const testPanel = h('div', { class: 'panel' },
     h('h3', { style: 'margin-top:0' }, 'Dry run against the live logs'),
@@ -314,7 +356,7 @@ function draw() {
       h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn', onclick: () => addNoise('') }, '+ Add noise rule'))),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Known issues (' + d.known_issues.length + ')'), issueCards,
       h('button', { class: 'btn', onclick: () => { d.known_issues.push({ id: '', note: '', match: '' }); touched(); draw(); } }, '+ Add known issue')),
-    testPanel, bar,
+    snoozePanel, testPanel, bar,
   ]);
 }
 

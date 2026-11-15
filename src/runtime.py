@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import time
+import uuid
 
 import aiops
 import settings
@@ -38,7 +39,44 @@ def validate_doc(key, content):
     raise DocError([f"unknown config key {key!r} (expected one of {', '.join(KEYS)})"])
 
 
-PATCH_KEYS = ("add_noise", "remove_noise", "add_known_issues", "remove_known_issue_ids", "set_context")
+PATCH_KEYS = ("add_noise", "remove_noise", "add_known_issues", "remove_known_issue_ids", "set_context",
+              "add_snoozes", "remove_snooze_ids", "prune_expired_snoozes")
+
+
+def _new_snooze(s, now, errs):
+    """Egy add_snoozes elem -> a dokumentumba kerulo snooze (vagy None + hiba). 'hours' VAGY 'until' kell."""
+    if not isinstance(s, dict):
+        errs.append("add_snoozes: each item must be an object")
+        return None
+    extra = [k for k in s if k not in ("id", "regex", "hours", "until", "note")]
+    if extra:
+        errs.append(f"add_snoozes: unknown field(s) {', '.join(extra)}")
+        return None
+    if (s.get("hours") is None) == (s.get("until") is None):
+        errs.append("add_snoozes: give exactly one of 'hours' or 'until'")
+        return None
+    if s.get("hours") is not None:
+        h = s["hours"]
+        if isinstance(h, bool) or not isinstance(h, (int, float)) or not 0 < h <= aiops.SNOOZE_MAX_HOURS:
+            errs.append(f"add_snoozes: 'hours' must be a number between 0 and {aiops.SNOOZE_MAX_HOURS} (90 days)")
+            return None
+        until = now + aiops.dt.timedelta(hours=h)
+    else:
+        until = aiops.parse_until(s["until"])
+        if until is None:
+            errs.append("add_snoozes: 'until' must be a UTC time like 2026-01-31T12:00:00Z")
+            return None
+        if until <= now:
+            errs.append("add_snoozes: 'until' is in the past")
+            return None
+        if until > now + aiops.dt.timedelta(hours=aiops.SNOOZE_MAX_HOURS):
+            errs.append("add_snoozes: a snooze is limited to 90 days; use a noise rule for permanent muting")
+            return None
+    out = {"id": s.get("id") or "sn-" + uuid.uuid4().hex[:8], "regex": s.get("regex"),
+           "until": aiops.iso(until.replace(microsecond=0))}
+    if s.get("note"):
+        out["note"] = str(s["note"])[:300]
+    return out
 
 
 def apply_known_patch(doc, patch):
@@ -71,6 +109,27 @@ def apply_known_patch(doc, patch):
         d["known_issues"].append(k)
     if "set_context" in patch:
         d["context"] = patch["set_context"]
+    if any(k in patch for k in ("add_snoozes", "remove_snooze_ids", "prune_expired_snoozes")):
+        now = aiops.utcnow().replace(tzinfo=None)
+        sn = d.setdefault("snoozes", [])
+        sids = [s.get("id") for s in sn if isinstance(s, dict)]
+        for sid in patch.get("remove_snooze_ids", []):
+            if sid not in sids:
+                errs.append(f"remove_snooze_ids: no such id: {sid!r}")
+            else:
+                sn[:] = [s for s in sn if s.get("id") != sid]
+        if patch.get("prune_expired_snoozes"):
+            sn[:] = [s for s in sn if (aiops.parse_until(s.get("until")) or now) > now]
+        for s in patch.get("add_snoozes", []):
+            new = _new_snooze(s, now, errs)
+            if new is None:
+                continue
+            if any(x.get("id") == new["id"] for x in sn):
+                errs.append(f"add_snoozes: id already present: {new['id']!r}")
+            else:
+                sn.append(new)
+        if not sn:
+            d.pop("snoozes", None)
     if errs:
         raise DocError(errs)
     return d

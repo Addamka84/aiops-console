@@ -48,6 +48,12 @@ class TestIn(BaseModel):
     patch: dict | None = None
 
 
+class SnoozeIn(BaseModel):
+    regex: str
+    hours: float
+    note: str = ""
+
+
 class DigestIn(BaseModel):
     hours: int | None = None
 
@@ -302,6 +308,47 @@ def create_app(rt, tokens=None):
         except StoreError as e:
             fail(e)
         return {"status": "rejected"}
+
+    # ------------------------------------------------------------ snooze: ideiglenes nemitas lejarati idovel
+    def snooze_views():
+        now = aiops.utcnow().replace(tzinfo=None)
+        out = []
+        for s in (store.current("known") or {"content": {}})["content"].get("snoozes", []):
+            until = aiops.parse_until(s.get("until"))
+            left = int((until - now).total_seconds()) if until else 0
+            out.append({"id": s.get("id"), "regex": s.get("regex"), "until": s.get("until"), "note": s.get("note", ""),
+                        "active": left > 0, "remaining_s": max(left, 0)})
+        return out
+
+    @app.get("/api/v1/snoozes")
+    def list_snoozes(_: Actor = Depends(read)):
+        """Az ideiglenes nemitasok (aktiv + lejart, utobbiakat a prune_expired_snoozes patch torli)."""
+        return snooze_views()
+
+    @app.post("/api/v1/snoozes")
+    def add_snooze(body: SnoozeIn, who: Actor = Depends(admin)):
+        """Egy regex ideiglenes nemitasa (hours: 1..2160). Olvaso token: javaslat (POST /proposals, add_snoozes)."""
+        cur = (store.current("known") or {"content": {}})["content"]
+        item = {"regex": body.regex, "hours": body.hours, "note": body.note}
+        try:
+            doc = runtime.validate_doc("known", runtime.apply_known_patch(cur, {"add_snoozes": [item]}))
+        except runtime.DocError as e:
+            fail(e)
+        added = doc["snoozes"][-1]
+        rid = store.put("known", doc, who.name, f"snooze {added['id']} until {added['until']}" + (f": {body.note}" if body.note else ""))
+        rt.changed()
+        return {"rev": rid, "snooze": added}
+
+    @app.delete("/api/v1/snoozes/{sid}")
+    def delete_snooze(sid: str, who: Actor = Depends(admin)):
+        cur = (store.current("known") or {"content": {}})["content"]
+        try:
+            doc = runtime.validate_doc("known", runtime.apply_known_patch(cur, {"remove_snooze_ids": [sid]}))
+        except runtime.DocError as e:
+            raise HTTPException(404, {"errors": e.errors})
+        rid = store.put("known", doc, who.name, f"remove snooze {sid}")
+        rt.changed()
+        return {"rev": rid}
 
     # ------------------------------------------------------------ feladatok, audit
     @app.post("/api/v1/jobs/digest")

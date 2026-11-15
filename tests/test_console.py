@@ -232,6 +232,64 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(r["noise_lines"], 70)
 
 
+class SnoozeTests(unittest.TestCase):
+    LINE = "homesrv | frobnicate | auth error"
+
+    def doc(self, until, rx=r"\| frobnicate \|"):
+        d = copy.deepcopy(FIXTURE)
+        d["snoozes"] = [{"id": "s1", "regex": rx, "until": until}]
+        return d
+
+    def fmt(self, hours):
+        return aiops.iso(aiops.utcnow().replace(tzinfo=None) + aiops.dt.timedelta(hours=hours))
+
+    def test_active_snooze_acts_as_noise_and_expires(self):
+        k = aiops.Known(data=self.doc(self.fmt(2)))
+        self.assertEqual(k.classify_idx(self.LINE)[0], "snooze")
+        self.assertEqual(k.classify_row(self.LINE), ("noise", None))
+        later = aiops.utcnow().replace(tzinfo=None) + aiops.dt.timedelta(hours=3)
+        self.assertEqual(k.classify_idx(self.LINE, now=later)[0], "keep")  # lejart: ugyanaz a Known-peldany mar nem nemit
+
+    def test_expired_snooze_does_not_match(self):
+        k = aiops.Known(data=self.doc("2020-01-01T00:00:00Z"))
+        self.assertEqual(k.classify_idx(self.LINE)[0], "keep")
+
+    def test_validation(self):
+        self.assertEqual(aiops.validate_known(self.doc(self.fmt(1))), [])
+        self.assertEqual(aiops.validate_known(self.doc("2020-01-01T00:00:00Z")), [])  # a lejart marad ervenyes
+        for bad in (self.doc("tomorrow"), self.doc(self.fmt(1), rx="("), self.doc(self.fmt(1), rx="")):
+            self.assertTrue(aiops.validate_known(bad))
+        dup = self.doc(self.fmt(1))
+        dup["snoozes"].append(dict(dup["snoozes"][0]))
+        self.assertTrue(any("duplicate" in e for e in aiops.validate_known(dup)))
+
+    def test_patch_add_remove_prune(self):
+        d = runtime.apply_known_patch(FIXTURE, {"add_snoozes": [{"regex": "x", "hours": 2, "note": "n"}]})
+        self.assertEqual(len(d["snoozes"]), 1)
+        sid = d["snoozes"][0]["id"]
+        self.assertEqual(aiops.validate_known(d), [])
+        d2 = runtime.apply_known_patch(d, {"remove_snooze_ids": [sid]})
+        self.assertNotIn("snoozes", d2)
+        with self.assertRaises(runtime.DocError):
+            runtime.apply_known_patch(d2, {"remove_snooze_ids": ["nope"]})
+        old = self.doc("2020-01-01T00:00:00Z")
+        pruned = runtime.apply_known_patch(old, {"prune_expired_snoozes": True})
+        self.assertNotIn("snoozes", pruned)
+
+    def test_patch_limits(self):
+        for bad in ({"regex": "x"}, {"regex": "x", "hours": 0}, {"regex": "x", "hours": 24 * 91},
+                    {"regex": "x", "hours": 1, "until": self.fmt(1)}, {"regex": "x", "until": "2020-01-01T00:00:00Z"},
+                    {"regex": "x", "hours": True}, {"regex": "x", "hours": 1, "foo": 1}):
+            with self.assertRaises(runtime.DocError, msg=str(bad)):
+                runtime.apply_known_patch(FIXTURE, {"add_snoozes": [bad]})
+
+    def test_analyze_counts_snoozed_separately(self):
+        r = aiops.analyze_known(aiops.Known(data=self.doc(self.fmt(1))), AnalyzeTests.RAW)
+        self.assertEqual((r["snoozed_patterns"], r["snoozed_lines"]), (1, 20))
+        self.assertEqual(r["kept_patterns"], 1)
+        self.assertEqual(r["noise_lines"], 50)
+
+
 class ApiTests(unittest.TestCase):
     TOK = {"read": "r-token", "admin": "a-token"}
     R = {"Authorization": "Bearer r-token"}
@@ -258,6 +316,29 @@ class ApiTests(unittest.TestCase):
         # nyitott vegpontok (health, a UI statikus fajljai, regi /last JSON)
         self.assertEqual(self.c.get("/api/v1/health").status_code, 200)
         self.assertIn("last_digest", self.c.get("/last").json())
+
+    def test_snooze_endpoints(self):
+        body = {"regex": r"\| frobnicate \|", "hours": 2, "note": "noisy upgrade"}
+        self.assertEqual(self.c.post("/api/v1/snoozes", json=body, headers=self.R).status_code, 403)
+        self.assertEqual(self.c.post("/api/v1/snoozes", json=dict(body, hours=0), headers=self.A).status_code, 422)
+        self.assertEqual(self.c.post("/api/v1/snoozes", json=dict(body, regex="("), headers=self.A).status_code, 422)
+        r = self.c.post("/api/v1/snoozes", json=body, headers=self.A)
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["snooze"]["id"]
+        lst = self.c.get("/api/v1/snoozes", headers=self.R).json()
+        self.assertEqual([(s["id"], s["active"]) for s in lst], [(sid, True)])
+        self.assertTrue(7000 < lst[0]["remaining_s"] <= 7200)
+        # hat a futo Known-ra is: a regex-teszt mar nem latja a sort a megmaradtak kozott
+        t = self.c.post("/api/v1/test/known", json={"hours": 24}, headers=self.R).json()
+        self.assertEqual(t["snoozed_lines"], 20)
+        # olvaso token: javaslat
+        p = self.c.post("/api/v1/proposals", json={"key": "known", "comment": "snooze",
+                                                    "patch": {"add_snoozes": [{"regex": "zzz", "hours": 1}]}}, headers=self.R)
+        self.assertEqual(p.status_code, 200, p.text)
+        self.assertEqual(self.c.delete(f"/api/v1/snoozes/{sid}", headers=self.R).status_code, 403)
+        self.assertEqual(self.c.delete("/api/v1/snoozes/nope", headers=self.A).status_code, 404)
+        self.assertEqual(self.c.delete(f"/api/v1/snoozes/{sid}", headers=self.A).status_code, 200)
+        self.assertEqual(self.c.get("/api/v1/snoozes", headers=self.R).json(), [])
 
     def test_ui_static_files_and_headers(self):
         r = self.c.get("/")

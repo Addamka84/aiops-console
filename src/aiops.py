@@ -66,7 +66,7 @@ CFG = {
     "NOTIFY_TIMEOUT": _env_int("NOTIFY_TIMEOUT", 5),                          # mp / kiserlet (2 kiserlet)
     "HEARTBEAT_S": _env_int("HEARTBEAT_S", 300),   # mp: eletjel a tarba (pipeline:ai kind:heartbeat); 0 = kikapcsolva
 }
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -163,7 +163,7 @@ def validate_known(d):
         return ["the document must be a JSON object"]
     errs = []
     for k in d:
-        if k not in ("context", "noise", "known_issues") and not str(k).startswith("_"):
+        if k not in ("context", "noise", "known_issues", "snoozes") and not str(k).startswith("_"):
             errs.append(f"{k}: unknown top-level key")
     ctx = d.get("context", [])
     if not isinstance(ctx, list) or not all(isinstance(x, str) for x in ctx):
@@ -209,7 +209,49 @@ def validate_known(d):
                     re.compile(v)
                 except re.error as e:
                     errs.append(f"known_issues[{i}].{field}: invalid regex ({e})")
+    sn = d.get("snoozes", [])
+    if not isinstance(sn, list):
+        errs.append("snoozes: must be a list")
+    else:
+        seen = set()
+        for i, s in enumerate(sn):
+            if not isinstance(s, dict):
+                errs.append(f"snoozes[{i}]: must be an object")
+                continue
+            sid = s.get("id")
+            if not isinstance(sid, str) or not sid.strip():
+                errs.append(f"snoozes[{i}]: 'id' is required")
+            elif sid in seen:
+                errs.append(f"snoozes[{i}]: duplicate id {sid!r}")
+            else:
+                seen.add(sid)
+            rx = s.get("regex")
+            if not isinstance(rx, str) or not rx:
+                errs.append(f"snoozes[{i}]: 'regex' must be a non-empty regex string")
+            else:
+                try:
+                    re.compile(rx)
+                except re.error as e:
+                    errs.append(f"snoozes[{i}].regex: invalid regex ({e})")
+            if parse_until(s.get("until")) is None:
+                errs.append(f"snoozes[{i}]: 'until' must be a UTC time like 2026-01-31T12:00:00Z")
+            if "note" in s and not isinstance(s["note"], str):
+                errs.append(f"snoozes[{i}]: 'note' must be a string")
     return errs
+
+
+UNTIL_FMT = "%Y-%m-%dT%H:%M:%SZ"
+SNOOZE_MAX_HOURS = 24 * 90
+
+
+def parse_until(v):
+    """'2026-01-31T12:00:00Z' -> datetime (naiv UTC) | None ha ervenytelen."""
+    if not isinstance(v, str):
+        return None
+    try:
+        return dt.datetime.strptime(v, UNTIL_FMT)
+    except ValueError:
+        return None
 
 
 class Known:
@@ -221,6 +263,9 @@ class Known:
         d = data
         self.context = [str(x) for x in d.get("context", [])]
         self.noise = [re.compile(x) for x in d.get("noise", [])]
+        # Lejarati idovel ideiglenesen elnemitott sorok: a lejarat az osztalyozas pillanataban szamit (nincs ujratoltes)
+        self.snoozes = [{"id": s["id"], "regex": s["regex"], "rx": re.compile(s["regex"]),
+                         "until": parse_until(s["until"]), "note": s.get("note", "")} for s in d.get("snoozes", [])]
         self.issues = []
         for k in d.get("known_issues", []):
             self.issues.append({
@@ -229,19 +274,26 @@ class Known:
                 "match_output": re.compile(k.get("match_output", k["match"]), re.I),
             })
 
-    def classify_idx(self, text):
-        """-> ('noise', index) | ('known', issue_dict) | ('keep', None)"""
+    def classify_idx(self, text, now=None):
+        """-> ('noise', index) | ('snooze', snooze_dict) | ('known', issue_dict) | ('keep', None)"""
         for i, rx in enumerate(self.noise):
             if rx.search(text):
                 return "noise", i
+        if self.snoozes:
+            now = now or utcnow().replace(tzinfo=None)
+            for s in self.snoozes:
+                if s["until"] > now and s["rx"].search(text):
+                    return "snooze", s
         for ki in self.issues:
             if ki["match"].search(text):
                 return "known", ki
         return "keep", None
 
     def classify_row(self, text):
-        """-> ('noise', None) | ('known', issue) | ('keep', None)"""
+        """-> ('noise', None) | ('known', issue) | ('keep', None); az aktiv snooze zajnak szamit"""
         kind, what = self.classify_idx(text)
+        if kind == "snooze":
+            return "noise", None
         return kind, (what if kind == "known" else None)
 
     def post_filter(self, issues):
@@ -313,6 +365,8 @@ def analyze_known(known, raw, samples=4, kept_top=15):
     """Szaraz futas: egy Known-dokumentum hatasa a nyers sorokon (szabalyonkenti talalatok, megmaradt sorok)."""
     noise = [{"index": i, "regex": rx.pattern, "patterns": 0, "lines": 0, "samples": []} for i, rx in enumerate(known.noise)]
     issues = {k["id"]: {"id": k["id"], "patterns": 0, "lines": 0, "samples": []} for k in known.issues}
+    snoozed = {s["id"]: {"id": s["id"], "regex": s["regex"], "until": iso(s["until"]), "patterns": 0, "lines": 0, "samples": []}
+               for s in known.snoozes}
     kept, total = [], 0
     for sec, hf, idf in FILTERED_SECTIONS:
         for x in raw.get(sec, []):
@@ -325,6 +379,8 @@ def analyze_known(known, raw, samples=4, kept_top=15):
             kind, what = known.classify_idx(txt)
             if kind == "noise":
                 s = noise[what]
+            elif kind == "snooze":
+                s = snoozed[what["id"]]
             elif kind == "known":
                 s = issues[what["id"]]
             else:
@@ -343,6 +399,9 @@ def analyze_known(known, raw, samples=4, kept_top=15):
         "kept_patterns": len(kept),
         "noise": noise,
         "known": list(issues.values()),
+        "snoozed_patterns": sum(s["patterns"] for s in snoozed.values()),
+        "snoozed_lines": sum(s["lines"] for s in snoozed.values()),
+        "snoozes": list(snoozed.values()),
         "unused_noise": [s["index"] for s in noise if s["patterns"] == 0],
         "kept_top": [{"hits": n, "text": t} for n, t in kept[:kept_top]],
     }
