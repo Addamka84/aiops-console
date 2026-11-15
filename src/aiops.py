@@ -66,7 +66,7 @@ CFG = {
     "NOTIFY_TIMEOUT": _env_int("NOTIFY_TIMEOUT", 5),                          # mp / kiserlet (2 kiserlet)
     "HEARTBEAT_S": _env_int("HEARTBEAT_S", 300),   # mp: eletjel a tarba (pipeline:ai kind:heartbeat); 0 = kikapcsolva
 }
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -144,6 +144,68 @@ def vl_query(q, timeout=None):
     with urllib.request.urlopen(req, timeout=timeout or CFG["VL_TIMEOUT"]) as r:
         body = r.read().decode("utf-8", "replace")
     return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+
+PIPELINE_LABEL = {"": "journald/other"}
+
+
+def vl_stats_range(query, t_from, t_to, step, timeout=None):
+    """VictoriaLogs stats_query_range -> [{'metric': {...}, 'values': [[unix_ts, n], ...]}]"""
+    data = urllib.parse.urlencode({"query": query, "start": iso(t_from), "end": iso(t_to), "step": step}).encode()
+    req = urllib.request.Request(CFG["VL_URL"] + "/select/logsql/stats_query_range", data=data)
+    with urllib.request.urlopen(req, timeout=timeout or CFG["VL_TIMEOUT"]) as r:
+        body = json.loads(r.read().decode("utf-8", "replace"))
+    if body.get("status") != "success":
+        raise ValueError(f"stats_query_range: {str(body)[:200]}")
+    return body["data"]["result"]
+
+
+VOLUME_RANGES = {6: ("5m", 300), 24: ("1h", 3600), 72: ("3h", 10800), 168: ("6h", 21600)}
+
+
+def log_volume(hours, by="pipeline", top=7, now=None):
+    """Uzenetszam-idosor a VictoriaLogs-bol (a UI grafikonjahoz). -> {step_s, from, to, total, series: [{name, total, points:[n..]}]}
+    A pontok az ablak azonos hosszu vedrei (hianyzo vedor = 0); 'by=host' eseten a legnagyobb 'top' sorozat marad, a tobbi 'other'."""
+    if hours not in VOLUME_RANGES:
+        raise ValueError(f"hours must be one of {sorted(VOLUME_RANGES)}")
+    if by not in ("pipeline", "host"):
+        raise ValueError("by must be 'pipeline' or 'host'")
+    step, step_s = VOLUME_RANGES[hours]
+    now = now or utcnow()
+    # A VictoriaLogs a vedreket a lepeskoz igazitja (epoch tobbszorosei): az ablakot is igy vegzzuk, a legutolso vedor a folyamatban levo
+    t_to = dt.datetime.fromtimestamp((int(now.timestamp()) // step_s + 1) * step_s, dt.timezone.utc)
+    t_from = t_to - dt.timedelta(hours=hours)
+    res = vl_stats_range(f"* | stats by ({by}) count() as n", t_from, t_to, step)
+    t0 = int(t_from.timestamp())
+    n_buckets = int(hours * 3600 // step_s)
+    series = []
+    for r in res:
+        name = str(r["metric"].get(by, ""))
+        pts = [0] * n_buckets
+        for ts, v in r["values"]:
+            i = int((int(ts) - t0) // step_s)
+            if 0 <= i < n_buckets:
+                pts[i] += int(float(v))
+        series.append({"name": PIPELINE_LABEL.get(name, name) if by == "pipeline" else (name or "(none)"), "points": pts})
+    for s in series:
+        s["total"] = sum(s["points"])
+    series.sort(key=lambda s: -s["total"])
+    if by == "host" and len(series) > top:
+        rest = series[top:]
+        other = {"name": "other", "points": [sum(col) for col in zip(*[s["points"] for s in rest])]}
+        other["total"] = sum(other["points"])
+        series = series[:top] + [other]
+    return {"hours": hours, "by": by, "step_s": step_s, "from": iso(t_from), "to": iso(t_to),
+            "total": sum(s["total"] for s in series), "series": series}
+
+
+def window_totals(t_from, t_to):
+    """Hany naplosor volt az ablakban (forrasonkent): a digest 'mit neztem at' statisztikajahoz."""
+    rows = vl_query(f"_time:[{iso(t_from)}, {iso(t_to)}] -pipeline:ai | stats by (pipeline) count() as n")
+    out = {}
+    for r in rows:
+        out[PIPELINE_LABEL.get(r.get("pipeline", ""), r.get("pipeline", ""))] = int(r.get("n", 0))
+    return out
 
 
 def vl_insert(events, timeout=None):
@@ -367,7 +429,7 @@ def analyze_known(known, raw, samples=4, kept_top=15):
     issues = {k["id"]: {"id": k["id"], "patterns": 0, "lines": 0, "samples": []} for k in known.issues}
     snoozed = {s["id"]: {"id": s["id"], "regex": s["regex"], "until": iso(s["until"]), "patterns": 0, "lines": 0, "samples": []}
                for s in known.snoozes}
-    kept, total = [], 0
+    kept, total, lines_total = [], 0, 0
     for sec, hf, idf in FILTERED_SECTIONS:
         for x in raw.get(sec, []):
             total += 1
@@ -376,6 +438,7 @@ def analyze_known(known, raw, samples=4, kept_top=15):
                 n = int(x.get("hits", 0) or 0)
             except ValueError:
                 n = 0
+            lines_total += n
             kind, what = known.classify_idx(txt)
             if kind == "noise":
                 s = noise[what]
@@ -396,6 +459,9 @@ def analyze_known(known, raw, samples=4, kept_top=15):
         "noise_patterns": sum(s["patterns"] for s in noise),
         "noise_lines": sum(s["lines"] for s in noise),
         "known_patterns": sum(s["patterns"] for s in issues.values()),
+        "known_lines": sum(s["lines"] for s in issues.values()),
+        "candidate_lines": lines_total,
+        "kept_lines": sum(n for n, _ in kept),
         "kept_patterns": len(kept),
         "noise": noise,
         "known": list(issues.values()),
@@ -575,6 +641,28 @@ def parse_output(content):
 
 # ---------------------------------------------------------------- munka futtatasa
 
+def review_stats(known, raw, t_from, t_to):
+    """Mit nezett at ez a futas: naplosorok az ablakban (forrasonkent), a jelolt (hibajellegu) sorok, mennyit vitt el a zaj / snooze / ismert
+    ugy, mennyi jutott a modellhez. Sosem dob kivetelt (a statisztika hianya nem rontja el a munkat)."""
+    stats = {"hours": round((t_to - t_from).total_seconds() / 3600, 1)}
+    try:
+        a = analyze_known(known, raw)
+        stats.update({
+            "candidate_lines": a["candidate_lines"], "patterns": a["rows"], "noise_lines": a["noise_lines"],
+            "snoozed_lines": a["snoozed_lines"], "known_lines": a["known_lines"], "kept_patterns": a["kept_patterns"],
+            "kept_lines": a["kept_lines"],
+        })
+    except Exception as e:  # noqa: BLE001
+        log(f"statisztika (szuro) sikertelen: {type(e).__name__}: {e}", key="stats")
+    try:
+        tot = window_totals(t_from, t_to)
+        stats["window_lines"] = sum(tot.values())
+        stats["by_source"] = tot
+    except (OSError, ValueError) as e:
+        log(f"statisztika (osszes sor) sikertelen: {e}", key="stats")
+    return stats
+
+
 def run_job(job, known, pool, dry_run=False):
     """Egy munka lefuttatasa. -> 'done' | 'retry' (nincs vegpont / hiba) | 'dropped'"""
     t_from = dt.datetime.strptime(job["window_from"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
@@ -590,10 +678,12 @@ def run_job(job, known, pool, dry_run=False):
         system += INCIDENT_PROMPT_EXTRA
         extra = ["== ALERT that triggered this analysis:", cut(job.get("alert_text", ""), 300)]
     try:
-        user = build_input(known, t_from, t_to, extra)
+        raw = collect(t_from, t_to)
+        user = build_input(known, t_from, t_to, extra, raw=raw)
     except (OSError, ValueError) as e:
         log(f"VictoriaLogs lekerdezes sikertelen: {e}", key="vl_query")
         return "retry"
+    stats = review_stats(known, raw, t_from, t_to)
     t0 = time.monotonic()
     try:
         resp = ollama_chat(ep["url"], system, user)
@@ -607,7 +697,7 @@ def run_job(job, known, pool, dry_run=False):
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
-        "input_chars": len(user),
+        "input_chars": len(user), "stats": stats,
     }
     if job["kind"] == "incident":
         result["alert"] = job.get("alert_text", "")
@@ -700,6 +790,7 @@ def to_events(result):
         "all_clear": str(result["all_clear"]).lower(), "issue_count": str(len(result["issues"])), "max_severity": top,
         "dropped_known": str(result["dropped_known"]), "secs": str(result["secs"]),
         "prompt_tokens": str(result["prompt_tokens"]), "out_tokens": str(result["out_tokens"]),
+        "stats": json.dumps(result.get("stats") or {}, ensure_ascii=False, separators=(",", ":")),
     }
     if result["kind"] == "incident":
         head["alert"] = result.get("alert", "")

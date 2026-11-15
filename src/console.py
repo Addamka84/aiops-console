@@ -309,6 +309,47 @@ def create_app(rt, tokens=None):
             fail(e)
         return {"status": "rejected"}
 
+    # ------------------------------------------------------------ statisztika (VictoriaLogs-bol)
+    vol_cache = {}
+
+    @app.get("/api/v1/stats/volume")
+    def stats_volume(hours: int = 24, by: str = "pipeline", _: Actor = Depends(read)):
+        """Uzenetszam-idosor (stackelt grafikonhoz): by=pipeline|host, hours=6|24|72|168. 60 mp-ig gyorsitotarazva."""
+        key = (hours, by)
+        hit = vol_cache.get(key)
+        if hit and time.monotonic() - hit[0] < 60:
+            return hit[1]
+        try:
+            res = aiops.log_volume(hours, by)
+        except ValueError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        except OSError as e:
+            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+        vol_cache[key] = (time.monotonic(), res)
+        return res
+
+    @app.get("/api/v1/stats/runs")
+    def stats_runs(limit: int = Query(14, ge=1, le=100), kind: str = "digest", _: Actor = Depends(read)):
+        """A legutobbi futasok (digest / incident) 'mit neztem at' statisztikaja a VictoriaLogs pipeline:ai esemenyeibol."""
+        if kind not in ("digest", "incident", "all"):
+            raise HTTPException(422, {"errors": ["kind must be digest, incident or all"]})
+        kinds = "in(digest,incident)" if kind == "all" else kind
+        try:
+            rows = aiops.vl_query(f"_time:90d pipeline:ai kind:{kinds} | sort by (_time desc) | limit {int(limit)}")
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+        out = []
+        for r in rows:
+            try:
+                st = json.loads(r.get("stats") or "{}")
+            except ValueError:
+                st = {}
+            out.append({"time": r.get("_time"), "kind": r.get("kind"), "window": r.get("window"), "model": r.get("model"),
+                        "issue_count": int(r.get("issue_count") or 0), "max_severity": r.get("max_severity"),
+                        "all_clear": r.get("all_clear") == "true", "dropped_known": int(r.get("dropped_known") or 0),
+                        "secs": float(r.get("secs") or 0), "prompt_tokens": r.get("prompt_tokens"), "stats": st})
+        return out
+
     # ------------------------------------------------------------ snooze: ideiglenes nemitas lejarati idovel
     def snooze_views():
         now = aiops.utcnow().replace(tzinfo=None)

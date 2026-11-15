@@ -151,8 +151,107 @@ function resultCard(title, r) {
     h('p', { class: 'muted small' }, [r.model, r.endpoint, r.window || r.alert].filter(Boolean).join(' · ')),
     h('p', {}, r.summary || ''), issueList(r.issues));
 }
+// ---------------------------------------------------------------- statistics (review of the last check, log volume chart)
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs, ...kids) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (v !== null && v !== undefined && v !== false) e.setAttribute(k, v); }
+  for (const c of kids.flat(Infinity)) { if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c))); }
+  return e;
+}
+const fmtN = (n) => (n === undefined || n === null ? '-' : Number(n).toLocaleString());
+const fmtShort = (n) => (n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? +(n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n));
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), f = v / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+S.stats = { hours: 24, by: 'pipeline', runs: null, volume: null, error: '', at: 0 };
+async function loadStats(force) {
+  const st = S.stats;
+  if (!force && Date.now() - st.at < 60000) return;
+  st.at = Date.now();
+  try {
+    const [runs, volume] = await Promise.all([
+      api('GET', '/api/v1/stats/runs?kind=all&limit=14'),
+      api('GET', '/api/v1/stats/volume?hours=' + st.hours + '&by=' + st.by)]);
+    st.runs = runs; st.volume = volume; st.error = '';
+  } catch (e) { st.error = e.message; }
+}
+function volumeChart(v) {
+  const W = 760, H = 230, L = 50, R = 8, T = 8, B = 26;
+  const n = v.series.length ? v.series[0].points.length : 0;
+  if (!n) return h('p', { class: 'muted' }, 'No data in this window.');
+  const sums = Array.from({ length: n }, (_, i) => v.series.reduce((a, s) => a + s.points[i], 0));
+  const ymax = niceMax(Math.max(...sums));
+  const bw = (W - L - R) / n, y = (val) => T + (H - T - B) * (1 - val / ymax);
+  const t0 = Date.parse(v.from);
+  const svg = svgEl('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': 'Log messages per ' + (v.step_s / 3600 >= 1 ? v.step_s / 3600 + ' h' : v.step_s / 60 + ' min') });
+  for (let g = 0; g <= 4; g++) {
+    const val = (ymax * g) / 4;
+    svg.append(svgEl('line', { x1: L, x2: W - R, y1: y(val), y2: y(val), class: 'grid-line' }), svgEl('text', { x: L - 6, y: y(val) + 4, class: 'axis', 'text-anchor': 'end' }, fmtShort(val)));
+  }
+  const every = Math.max(1, Math.ceil(n / 8));
+  for (let i = 0; i < n; i++) {
+    let acc = 0;
+    v.series.forEach((s, k) => {
+      const c = s.points[i];
+      if (!c) return;
+      const top = y(acc + c), hgt = y(acc) - top;
+      acc += c;
+      svg.append(svgEl('rect', { x: L + i * bw + 0.5, y: top, width: Math.max(bw - 1, 1), height: Math.max(hgt, 0.5), class: 'c' + (k % 8) },
+        svgEl('title', {}, s.name + ': ' + fmtN(c) + ' · ' + new Date(t0 + i * v.step_s * 1000).toLocaleString())));
+    });
+    if (i % every === 0) {
+      const d = new Date(t0 + i * v.step_s * 1000);
+      svg.append(svgEl('text', { x: L + i * bw + bw / 2, y: H - 8, class: 'axis', 'text-anchor': 'middle' }, v.hours > 24 ? d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }) + ' ' + d.getHours() + 'h' : String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')));
+    }
+  }
+  const legend = h('div', { class: 'legend' }, v.series.map((s, k) => h('span', { class: 'lg' }, h('i', { class: 'sw c' + (k % 8) }), s.name, ' ', h('span', { class: 'muted' }, fmtN(s.total)))));
+  return h('div', {}, svg, legend);
+}
+function reviewCard(r) {
+  if (!r) return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Last check reviewed'), h('p', { class: 'muted' }, 'No check with statistics yet (they are recorded from v1.4.0 on).'));
+  const st = r.stats || {};
+  const cell = (label, val, sub) => h('div', { class: 'stat' }, h('div', { class: 'big' }, val), h('div', { class: 'small' }, label), sub ? h('div', { class: 'muted small' }, sub) : null);
+  const removed = (st.noise_lines || 0) + (st.snoozed_lines || 0);
+  const src = st.by_source ? Object.entries(st.by_source).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + fmtN(v)).join(' · ') : '';
+  return h('div', { class: 'panel' },
+    h('h3', { style: 'margin-top:0' }, 'Last check reviewed'),
+    h('p', { class: 'muted small' }, [r.kind, fmtTime(r.time), (st.hours ? 'window ' + st.hours + ' h' : ''), r.model, r.secs + ' s'].filter(Boolean).join(' · ')),
+    h('div', { class: 'stats' },
+      cell('log lines in the window', fmtN(st.window_lines), src),
+      cell('warning/error-like lines checked', fmtN(st.candidate_lines), fmtN(st.patterns) + ' distinct patterns'),
+      cell('removed as noise / snoozed', fmtN(removed), 'snoozed ' + fmtN(st.snoozed_lines || 0)),
+      cell('already-known issues', fmtN(st.known_lines)),
+      cell('sent to the model', fmtN(st.kept_patterns) + ' patterns', fmtN(st.kept_lines) + ' lines'),
+      cell('issues reported', fmtN(r.issue_count), r.dropped_known ? r.dropped_known + ' known dropped' : '')));
+}
+function runsTable(runs) {
+  if (!runs || !runs.length) return null;
+  const row = (r) => { const st = r.stats || {}; return h('tr', {},
+    h('td', { class: 'small nowrap' }, fmtTime(r.time)), h('td', {}, r.kind),
+    h('td', { class: 'num' }, fmtN(st.window_lines)), h('td', { class: 'num' }, fmtN(st.candidate_lines)),
+    h('td', { class: 'num' }, fmtN((st.noise_lines || 0) + (st.snoozed_lines || 0))), h('td', { class: 'num' }, fmtN(st.kept_patterns)),
+    h('td', { class: 'num' }, r.issue_count ? sevBadge(r.max_severity) : '0'), h('td', { class: 'num' }, r.secs + ' s')); };
+  return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Recent checks'),
+    h('table', {}, h('thead', {}, h('tr', {}, ['Time', 'Kind', 'Lines in window', 'Checked', 'Removed', 'To model', 'Issues', 'Took'].map((x, i) => h('th', { class: i > 1 ? 'num' : '' }, x)))),
+      h('tbody', {}, runs.map(row))));
+}
+function volumePanel() {
+  const st = S.stats;
+  const sel = (key, opts) => h('select', { onchange: async (e) => { st[key] = key === 'hours' ? Number(e.target.value) : e.target.value; await loadStats(true); pageStatus().catch(() => {}); } },
+    opts.map(([v, l]) => h('option', { value: v, selected: v === st[key] }, l)));
+  return h('div', { class: 'panel' },
+    h('div', { class: 'row' }, h('h3', { class: 'grow', style: 'margin:0' }, 'Log volume (messages in VictoriaLogs)'),
+      sel('hours', [[6, '6 h'], [24, '24 h'], [72, '3 days'], [168, '7 days']]),
+      sel('by', [['pipeline', 'by source type'], ['host', 'by host']])),
+    st.error ? h('div', { class: 'err' }, 'Statistics unavailable: ' + st.error) : null,
+    st.volume ? h('p', { class: 'muted small' }, fmtN(st.volume.total) + ' messages in the window. Hover a bar for details.') : null,
+    st.volume ? volumeChart(st.volume) : null);
+}
 async function pageStatus() {
-  const s = await api('GET', '/api/v1/status');
+  const [s] = await Promise.all([api('GET', '/api/v1/status'), loadStats(false)]);
   const hoursInp = h('input', { type: 'number', min: 1, max: 168, value: 24, style: 'width:80px' });
   const busy = { v: false };
   const act = (fn) => async (ev) => {
@@ -181,6 +280,9 @@ async function pageStatus() {
           : h('p', { class: 'muted small' }, 'Admin token required.'),
         isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
           h('button', { class: 'btn', disabled: !s.notify_configured, onclick: act(async () => { await api('POST', '/api/v1/jobs/notify-test'); toast('Test notification queued'); }) }, 'Send test notification')) : null)),
+    reviewCard(S.stats.runs ? S.stats.runs.find((r) => r.kind === 'digest' && r.stats && r.stats.window_lines !== undefined) || null : null),
+    volumePanel(),
+    runsTable(S.stats.runs),
     resultCard('Last digest', s.last_digest),
     resultCard('Last incident', s.last_incident),
   ]);

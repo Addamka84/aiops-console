@@ -317,6 +317,48 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/health").status_code, 200)
         self.assertIn("last_digest", self.c.get("/last").json())
 
+    def test_stats_endpoints(self):
+        self.assertEqual(self.c.get("/api/v1/stats/volume").status_code, 401)
+        calls = []
+        orig_stats, orig_q = aiops.vl_stats_range, aiops.vl_query
+        base = int(aiops.utcnow().timestamp()) // 3600 * 3600
+        aiops.vl_stats_range = lambda q, a, b, step, timeout=None: (calls.append((q, step)) or
+                                                                       [{"metric": {"pipeline": "docker"}, "values": [[base, "42"]]}])
+        stats = {"hours": 24, "window_lines": 1000, "candidate_lines": 50, "noise_lines": 20, "kept_patterns": 3}
+        aiops.vl_query = lambda q, timeout=None: (calls.append((q, None)) or [
+            {"_time": "2026-11-15T06:30:00Z", "kind": "digest", "window": "x..y", "model": "m", "issue_count": "2", "max_severity": "high",
+             "all_clear": "false", "dropped_known": "1", "secs": "12.5", "prompt_tokens": "900", "stats": json.dumps(stats)},
+            {"_time": "2026-11-14T06:30:00Z", "kind": "digest", "issue_count": "0", "secs": "9", "stats": ""}])
+        try:
+            v = self.c.get("/api/v1/stats/volume?hours=24&by=pipeline", headers=self.R)
+            self.assertEqual(v.status_code, 200, v.text)
+            self.assertEqual(v.json()["series"][0]["name"], "docker")
+            self.assertEqual(v.json()["total"], 42)
+            self.c.get("/api/v1/stats/volume?hours=24&by=pipeline", headers=self.R)
+            self.assertEqual(len([c for c in calls if c[1] == "1h"]), 1)  # 60 mp-es gyorsitotar
+            self.assertEqual(self.c.get("/api/v1/stats/volume?hours=5", headers=self.R).status_code, 422)
+            self.assertEqual(self.c.get("/api/v1/stats/volume?by=message", headers=self.R).status_code, 422)
+            r = self.c.get("/api/v1/stats/runs", headers=self.R)
+            self.assertEqual(r.status_code, 200, r.text)
+            runs = r.json()
+            self.assertEqual(runs[0]["stats"]["window_lines"], 1000)
+            self.assertEqual((runs[0]["issue_count"], runs[0]["all_clear"], runs[0]["secs"]), (2, False, 12.5))
+            self.assertEqual(runs[1]["stats"], {})  # a regi (statisztika nelkuli) futas is megjelenik
+            self.assertIn("kind:digest", [c[0] for c in calls if c[1] is None][-1])
+            self.assertEqual(self.c.get("/api/v1/stats/runs?kind=bogus", headers=self.R).status_code, 422)
+        finally:
+            aiops.vl_stats_range, aiops.vl_query = orig_stats, orig_q
+
+    def test_stats_vl_error_is_502(self):
+        orig = aiops.vl_query
+        def boom(q, timeout=None):
+            raise OSError("down")
+        aiops.vl_query = boom
+        try:
+            self.assertEqual(self.c.get("/api/v1/stats/runs", headers=self.R).status_code, 502)
+        finally:
+            aiops.vl_query = orig
+
     def test_snooze_endpoints(self):
         body = {"regex": r"\| frobnicate \|", "hours": 2, "note": "noisy upgrade"}
         self.assertEqual(self.c.post("/api/v1/snoozes", json=body, headers=self.R).status_code, 403)

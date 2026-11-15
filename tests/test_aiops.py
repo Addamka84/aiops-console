@@ -122,6 +122,48 @@ class HeartbeatTests(unittest.TestCase):
         self.assertTrue(settings.validate({"HEARTBEAT_S": 99999})[1])
 
 
+class VolumeTests(unittest.TestCase):
+    NOW = aiops.dt.datetime(2026, 11, 15, 16, 20, tzinfo=aiops.dt.timezone.utc)
+
+    def setUp(self):
+        self._orig = aiops.vl_stats_range
+
+    def tearDown(self):
+        aiops.vl_stats_range = self._orig
+
+    def fake(self, series):
+        def f(query, t_from, t_to, step, timeout=None):
+            self.called = (query, aiops.iso(t_from), aiops.iso(t_to), step)
+            return series
+        aiops.vl_stats_range = f
+
+    def test_buckets_are_aligned_and_missing_are_zero(self):
+        t_to = int(aiops.dt.datetime(2026, 11, 15, 17, 0, tzinfo=aiops.dt.timezone.utc).timestamp())
+        self.fake([{"metric": {"pipeline": "syslog"}, "values": [[t_to - 3600, "5"], [t_to - 7200, "2"]]},
+                   {"metric": {"pipeline": ""}, "values": [[t_to - 3600, "1"]]}])
+        v = aiops.log_volume(24, "pipeline", now=self.NOW)
+        self.assertEqual((v["from"], v["to"], v["step_s"]), ("2026-11-14T17:00:00Z", "2026-11-15T17:00:00Z", 3600))
+        self.assertEqual(self.called[3], "1h")
+        sy = v["series"][0]
+        self.assertEqual((sy["name"], len(sy["points"]), sy["points"][-1], sy["points"][-2], sy["total"]), ("syslog", 24, 5, 2, 7))
+        self.assertEqual(v["series"][1]["name"], "journald/other")
+        self.assertEqual(v["total"], 8)
+
+    def test_host_series_are_capped_with_other(self):
+        base = int(aiops.dt.datetime(2026, 11, 15, 16, 0, tzinfo=aiops.dt.timezone.utc).timestamp())
+        self.fake([{"metric": {"host": f"h{i}"}, "values": [[base, str(10 + i)]]} for i in range(12)])
+        v = aiops.log_volume(6, "host", top=3, now=self.NOW)
+        self.assertEqual([s["name"] for s in v["series"]], ["h11", "h10", "h9", "other"])
+        self.assertEqual(v["series"][-1]["total"], sum(10 + i for i in range(9)))
+        self.assertEqual(v["step_s"], 300)
+
+    def test_bad_arguments(self):
+        self.fake([])
+        for hours, by in ((5, "pipeline"), (24, "message")):
+            with self.assertRaises(ValueError):
+                aiops.log_volume(hours, by, now=self.NOW)
+
+
 class KnownTests(unittest.TestCase):
     def setUp(self):
         self.k = aiops.Known()
@@ -320,6 +362,64 @@ class JobTests(unittest.TestCase):
         self.assertIn("homesrv | homarr-v2 | 20 error-like lines", user)
         self.assertNotIn("immich_server", user)
         self.assertLess(user.index("homesrv | homarr-v2 |"), user.index("homesrv3 | radarr |") + 1000)  # mindketto a szakaszban
+
+    def test_review_stats_are_recorded(self):
+        inserts = []
+        rows = dict(self.rows)
+        rows["-pipeline:ai"] = [{"pipeline": "syslog", "n": "1000"}, {"pipeline": "docker", "n": "500"}, {"n": "40"}]
+        vl, vl_url = start(make_vl(rows, inserts))
+        ol, ol_url = start(make_ollama())
+        try:
+            aiops.CFG["VL_URL"] = vl_url
+            pool = aiops.EndpointPool([ol_url], "qwen3.5:9b")
+            self.assertEqual(aiops.run_job(self.job, self.known, pool), "done")
+        finally:
+            vl.shutdown()
+            ol.shutdown()
+        st = json.loads(inserts[0]["stats"])
+        self.assertEqual(st["hours"], 24.0)
+        self.assertEqual(st["window_lines"], 1540)
+        self.assertEqual(st["by_source"], {"syslog": 1000, "docker": 500, "journald/other": 40})
+        # a 'candidate' sorok: syslog 36+36+2, docker 6+5+20+3, journald 10
+        self.assertEqual(st["candidate_lines"], 118)
+        self.assertGreater(st["noise_lines"], 0)
+        self.assertEqual(st["noise_lines"] + st["known_lines"] + st["kept_lines"] + st["snoozed_lines"], st["candidate_lines"])
+        self.assertEqual(aiops.STATUS["last_digest"]["stats"]["window_lines"], 1540)
+
+    def test_stats_failure_does_not_break_the_job(self):
+        inserts = []
+
+        class Boom(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(n).decode()
+                if self.path.startswith("/insert/jsonline"):
+                    inserts.extend(json.loads(l) for l in body.splitlines() if l.strip())
+                    self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+                    return
+                q = urllib.parse.parse_qs(body).get("query", [""])[0]
+                if "-pipeline:ai" in q:
+                    self.send_response(500); self.send_header("Content-Length", "0"); self.end_headers()
+                    return
+                data = "".join(json.dumps(r) + "\n" for m, rs in JobTests.ROWS.items() if m in q for r in rs).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
+        JobTests.ROWS = self.rows
+        vl, vl_url = start(Boom)
+        ol, ol_url = start(make_ollama())
+        try:
+            aiops.CFG["VL_URL"] = vl_url
+            pool = aiops.EndpointPool([ol_url], "qwen3.5:9b")
+            self.assertEqual(aiops.run_job(self.job, self.known, pool), "done")
+        finally:
+            vl.shutdown()
+            ol.shutdown()
+        st = json.loads(inserts[0]["stats"])
+        self.assertNotIn("window_lines", st)
+        self.assertIn("candidate_lines", st)
 
     def test_no_endpoint_does_not_touch_vl(self):
         inserts = []
