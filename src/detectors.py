@@ -32,15 +32,19 @@ def check_query(q):
         return "query must be a non-empty LogsQL filter"
     if len(q) > 300:
         return "query is at most 300 characters"
-    if "|" in q:
-        return "query must be a filter only (no pipes: the grouping and counting are added by the detector)"
-    if "\n" in q or "\r" in q or ";" in q:
-        return "query must be a single line without ';'"
-    if re.search(r"(^|[\s(])_time\s*:", q):
-        return "do not use _time in the query: the window setting does that"
-    if q.count('"') % 2:
+    if "\n" in q or "\r" in q:
+        return "query must be a single line"
+    # A "..." szovegek (pl. regex: (ERROR|CRITICAL) \\() belsejeben a cso, a zarojel es a pontosvesszo megengedett: a szerkezetet a kivagott szovegen nezzuk
+    bare = re.sub(r'"(?:\\.|[^"\\])*"', '""', q)
+    if '"' in bare.replace('""', ""):
         return "unbalanced quotes in the query"
-    if q.count("(") != q.count(")"):
+    if "|" in bare:
+        return "query must be a filter only (no pipes outside quotes: the grouping and counting are added by the detector)"
+    if ";" in bare:
+        return "query must not contain ';' outside quotes"
+    if re.search(r"(^|[\s(])_time\s*:", bare):
+        return "do not use _time in the query: the window setting does that"
+    if bare.count("(") != bare.count(")"):
         return "unbalanced parentheses in the query"
     return None
 

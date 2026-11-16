@@ -61,6 +61,12 @@ class ValidateTests(unittest.TestCase):
         for good in ('appname:plex', '"Out of memory"', '_msg:~"(?i)a|b"' if False else '_msg:~"(?i)fatal"', "host:x AND -appname:y", "(a OR b) c", "*"):
             self.assertIsNone(detectors.check_query(good), good)
 
+    def test_regex_alternation_and_parentheses_inside_quotes_are_fine(self):
+        for good in ('_msg:~"(ERROR|CRITICAL) "', '_msg:~"ERROR \\\\(MainThread\\\\)" host:x', '_msg:~"a;b" AND -"x|y"', '"say \\"hi|there\\""'):
+            self.assertIsNone(detectors.check_query(good), good)
+        for bad in ('_msg:~"ERROR" | stats count()', '"unterminated', 'a "b" | c', '(_msg:~"(x)" ', 'a ; b'):
+            self.assertIsNotNone(detectors.check_query(bad), bad)
+
     def test_absent_cannot_group(self):
         self.assertTrue(self.errs(det(mode="absent", group_by=["host"])))
 

@@ -87,7 +87,7 @@ CFG = {
     "FLAP_WINDOW_H": _env_int("FLAP_WINDOW_H", 6),
     "FLAP_COOLDOWN_MIN": _env_int("FLAP_COOLDOWN_MIN", 180),
 }
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -784,7 +784,7 @@ def alert_labels(alerts_json, alertname="", limit=4):
     for a in arr if isinstance(arr, list) else []:
         lab = a.get("labels") if isinstance(a, dict) else None
         if isinstance(lab, dict):
-            out.append({k: str(lab[k])[:80] for k in ("alertname", "host", "SYSLOG_IDENTIFIER", "appname", "severity") if k in lab})
+            out.append({k: str(lab[k])[:80] for k in ("alertname", "host", "SYSLOG_IDENTIFIER", "appname", "severity", "monitor") if k in lab})
         if len(out) >= limit:
             break
     if not out and alertname:

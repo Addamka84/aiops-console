@@ -167,6 +167,22 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(calls[0][0], "/api/chat")
 
 
+class KumaLabelTests(unittest.TestCase):
+    def test_the_monitor_label_is_kept_and_resolves_through_a_topology_alias(self):
+        import topology
+        labs = aiops.alert_labels(json.dumps([{"labels": {"alertname": "KumaMonitorDown", "monitor": "GameSRV - CS1.6", "severity": "warning", "junk": "x"}}]))
+        self.assertEqual(labs, [{"alertname": "KumaMonitorDown", "severity": "warning", "monitor": "GameSRV - CS1.6"}])
+        topo = topology.Topology({"assets": [{"id": "nihil", "kind": "device", "aliases": ["GameSRV"]}]})
+        saved = aiops.TOPOLOGY
+        aiops.TOPOLOGY = topo
+        try:
+            st = {"pending": [], "recent_alert_keys": {}, "incident_times": [], "alert_items": []}
+            aiops.queue_alert(st, aiops.utcnow(), "KumaMonitorDown|", "[FIRING] KumaMonitorDown x1", labs, None)
+        finally:
+            aiops.TOPOLOGY = saved
+        self.assertEqual(st["alert_items"][0]["cis"], ["nihil"])
+
+
 class FlappingTests(unittest.TestCase):
     def setUp(self):
         self.saved = dict(aiops.CFG)
