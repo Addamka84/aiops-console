@@ -37,6 +37,17 @@ class Store:
                 CREATE TABLE IF NOT EXISTS audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL,
                     action TEXT NOT NULL, detail TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS nov_patterns (
+                    key TEXT PRIMARY KEY, source TEXT NOT NULL, host TEXT NOT NULL, ident TEXT NOT NULL, level TEXT NOT NULL,
+                    tmpl TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, total INTEGER NOT NULL,
+                    since TEXT NOT NULL, last_spike TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS nov_patterns_seen ON nov_patterns (last_seen);
+                CREATE TABLE IF NOT EXISTS nov_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
+                    source TEXT NOT NULL, host TEXT NOT NULL, ident TEXT NOT NULL, level TEXT NOT NULL, tmpl TEXT NOT NULL,
+                    hits INTEGER NOT NULL, baseline REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open');
+                CREATE INDEX IF NOT EXISTS nov_findings_ts ON nov_findings (ts);
+                CREATE TABLE IF NOT EXISTS nov_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
             """)
             self.db.commit()
 
@@ -132,6 +143,91 @@ class Store:
             self._audit(actor, f"proposal.{'approve' if approve else 'reject'}", f"proposal {pid}")
             self.db.commit()
         return rid
+
+    # ---- ujdonsag-eszleles (novelty.py): minta-alapvonal, leletek, allapot. A konfig-verziozashoz nem tartozik.
+    def nov_meta(self, k, default=""):
+        with self.lock:
+            r = self.db.execute("SELECT v FROM nov_meta WHERE k=?", (k,)).fetchone()
+        return r["v"] if r else default
+
+    def nov_set_meta(self, k, v):
+        with self.lock:
+            self.db.execute("INSERT INTO nov_meta (k, v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
+            self.db.commit()
+
+    def nov_patterns(self, keys):
+        """kulcs -> sor (dict); egy lekerdezesben (a kulcsok szama nagy lehet, ezert darabolva)."""
+        out = {}
+        keys = list(keys)
+        with self.lock:
+            for i in range(0, len(keys), 500):
+                part = keys[i:i + 500]
+                q = "SELECT * FROM nov_patterns WHERE key IN (%s)" % ",".join("?" * len(part))
+                for r in self.db.execute(q, part).fetchall():
+                    out[r["key"]] = dict(r)
+        return out
+
+    def nov_upsert(self, rows):
+        """rows: dict-ek (key, source, host, ident, level, tmpl, first_seen, last_seen, total, since, last_spike).
+        Letezo kulcsnal: az elso latas a kisebb, az utolso a nagyobb, az osszeg novekszik, a tobbi mezo marad."""
+        with self.lock:
+            self.db.executemany("""
+                INSERT INTO nov_patterns (key, source, host, ident, level, tmpl, first_seen, last_seen, total, since, last_spike)
+                VALUES (:key,:source,:host,:ident,:level,:tmpl,:first_seen,:last_seen,:total,:since,:last_spike)
+                ON CONFLICT(key) DO UPDATE SET
+                    first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen),
+                    total = total + excluded.total, host = excluded.host, level = excluded.level,
+                    since = MIN(since, excluded.since),
+                    last_spike = CASE WHEN excluded.last_spike > last_spike THEN excluded.last_spike ELSE last_spike END
+            """, rows)
+            self.db.commit()
+
+    def nov_add_findings(self, items):
+        with self.lock:
+            self.db.executemany("""INSERT INTO nov_findings (ts, kind, key, source, host, ident, level, tmpl, hits, baseline)
+                                   VALUES (:ts,:kind,:key,:source,:host,:ident,:level,:tmpl,:hits,:baseline)""", items)
+            self.db.commit()
+
+    def nov_findings(self, status="open", since=None, limit=100):
+        q, args = "SELECT * FROM nov_findings WHERE 1=1", []
+        if status:
+            q += " AND status=?"
+            args.append(status)
+        if since:
+            q += " AND ts>=?"
+            args.append(since)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        with self.lock:
+            return [dict(r) for r in self.db.execute(q, args).fetchall()]
+
+    def nov_dismiss(self, fid=None, actor="system"):
+        """Egy lelet (vagy mind) elintezettre allitasa. -> az erintett sorok szama"""
+        with self.lock:
+            if fid is None:
+                cur = self.db.execute("UPDATE nov_findings SET status='dismissed' WHERE status='open'")
+            else:
+                cur = self.db.execute("UPDATE nov_findings SET status='dismissed' WHERE id=? AND status='open'", (fid,))
+            self._audit(actor, "novelty.dismiss", "all" if fid is None else f"finding {fid}")
+            self.db.commit()
+            return cur.rowcount
+
+    def nov_counts(self):
+        with self.lock:
+            p = self.db.execute("SELECT COUNT(*) AS n FROM nov_patterns").fetchone()["n"]
+            o = self.db.execute("SELECT COUNT(*) AS n FROM nov_findings WHERE status='open'").fetchone()["n"]
+        return {"patterns": p, "open_findings": o}
+
+    def nov_prune(self, keep_since_iso, max_patterns=100000, findings_keep_iso=None, max_findings=500):
+        with self.lock:
+            self.db.execute("DELETE FROM nov_patterns WHERE last_seen < ?", (keep_since_iso,))
+            self.db.execute("""DELETE FROM nov_patterns WHERE key IN
+                               (SELECT key FROM nov_patterns ORDER BY last_seen DESC LIMIT -1 OFFSET ?)""", (max_patterns,))
+            if findings_keep_iso:
+                self.db.execute("DELETE FROM nov_findings WHERE ts < ?", (findings_keep_iso,))
+            self.db.execute("""DELETE FROM nov_findings WHERE id NOT IN
+                               (SELECT id FROM nov_findings ORDER BY id DESC LIMIT ?)""", (max_findings,))
+            self.db.commit()
 
     # ---- audit
     def _audit(self, actor, action, detail):

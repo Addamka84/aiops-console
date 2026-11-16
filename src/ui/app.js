@@ -250,8 +250,50 @@ function volumePanel() {
     st.volume ? h('p', { class: 'muted small' }, fmtN(st.volume.total) + ' messages in the window. Hover a bar for details.') : null,
     st.volume ? volumeChart(st.volume) : null);
 }
+// New log patterns / rate spikes found by the detector (report mode). Everything is rendered as text.
+S.novelty = { data: null, error: '' };
+async function loadNovelty() {
+  try { S.novelty.data = await api('GET', '/api/v1/novelty?status=open&limit=100'); S.novelty.error = ''; } catch (e) { S.novelty.error = e.message; }
+}
+const lvlSev = (l) => (['emerg', 'alert', 'crit', 'err', 'error'].includes(l) ? 'high' : l === 'warning' ? 'medium' : 'info');
+async function noveltyDo(fn) {
+  try { await fn(); } catch (e) { toast(e.message, true); }
+  await loadNovelty(); pageStatus().catch(() => {});
+}
+function noveltyPanel() {
+  const title = h('h3', { class: 'grow', style: 'margin:0' }, 'New patterns & rate spikes');
+  const n = S.novelty.data;
+  if (!n) return h('div', { class: 'panel' }, h('div', { class: 'row' }, title), S.novelty.error ? h('div', { class: 'err' }, 'Unavailable: ' + S.novelty.error) : null);
+  const st = n.status, f = n.findings;
+  const learning = st.learning_until && new Date(st.learning_until) > new Date();
+  const info = st.mode !== 'report' ? 'The detector is off (setting NOVELTY_MODE).'
+    : st.backfill === 'running' ? 'Building the baseline from stored logs, findings start afterwards.'
+      : [fmtN(st.patterns) + ' patterns in the baseline', st.last_scan ? 'last scan ' + fmtTime(st.last_scan) : 'first scan pending',
+        learning ? 'learning until ' + fmtTime(st.learning_until) + ' (no findings yet)' : '',
+        st.error ? 'last error: ' + st.error : '', st.truncated && st.truncated.length ? 'very many distinct messages in: ' + st.truncated.join(', ') : ''].filter(Boolean).join(' · ');
+  const text = (x) => x.host + ' | ' + x.ident + ' | ' + x.tmpl;
+  const row = (x) => h('tr', {},
+    h('td', { class: 'small nowrap' }, fmtTime(x.ts)),
+    h('td', {}, h('span', { class: 'badge sev-' + (x.kind === 'spike' ? 'medium' : 'low') }, x.kind)),
+    h('td', {}, h('span', { class: 'badge sev-' + lvlSev(x.level) }, x.level)),
+    h('td', { class: 'small' }, x.host, h('div', { class: 'muted' }, x.ident)),
+    h('td', { class: 'mono small', style: 'word-break:break-word' }, x.tmpl),
+    h('td', { class: 'num small nowrap' }, fmtN(x.hits) + 'x', x.kind === 'spike' ? h('div', { class: 'muted' }, 'usual ~' + x.baseline) : null),
+    h('td', { class: 'nowrap' },
+      h('button', { class: 'btn', title: 'Propose a noise rule for this line (review it on the Proposals page)', onclick: () => noveltyDo(async () => {
+        const r = await api('POST', '/api/v1/proposals', { key: 'known', comment: 'noise from the novelty detector: ' + x.ident, patch: { add_noise: [ruleFromLine(text(x))] } });
+        toast('Proposal #' + r.id + ' created.'); refreshPendingCount();
+      }) }, '+ noise'), ' ',
+      isAdmin() ? h('button', { class: 'btn', title: 'Mark as reviewed (hides it from this list and the digest)', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/' + x.id + '/dismiss')) }, 'Dismiss') : null));
+  return h('div', { class: 'panel' },
+    h('div', { class: 'row' }, title,
+      isAdmin() && f.length > 1 ? h('button', { class: 'btn', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/dismiss-all')) }, 'Dismiss all') : null),
+    h('p', { class: 'muted small' }, info),
+    f.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Found', 'Kind', 'Level', 'Source', 'Message pattern', 'Count', ''].map((x, i) => h('th', { class: i === 5 ? 'num' : '' }, x)))),
+      h('tbody', {}, f.map(row))) : h('p', { class: 'muted' }, st.mode === 'report' ? 'Nothing new. Patterns never seen before, or far above their normal rate, will show up here.' : ''));
+}
 async function pageStatus() {
-  const [s] = await Promise.all([api('GET', '/api/v1/status'), loadStats(false)]);
+  const [s] = await Promise.all([api('GET', '/api/v1/status'), loadStats(false), loadNovelty()]);
   const hoursInp = h('input', { type: 'number', min: 1, max: 168, value: 24, style: 'width:80px' });
   const busy = { v: false };
   const act = (fn) => async (ev) => {
@@ -280,6 +322,7 @@ async function pageStatus() {
           : h('p', { class: 'muted small' }, 'Admin token required.'),
         isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
           h('button', { class: 'btn', disabled: !s.notify_configured, onclick: act(async () => { await api('POST', '/api/v1/jobs/notify-test'); toast('Test notification queued'); }) }, 'Send test notification')) : null)),
+    noveltyPanel(),
     reviewCard(S.stats.runs ? S.stats.runs.find((r) => r.kind === 'digest' && r.stats && r.stats.window_lines !== undefined) || null : null),
     volumePanel(),
     runsTable(S.stats.runs),

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 import aiops
+import novelty
 import runtime
 import settings
 from store import StoreError
@@ -390,6 +391,24 @@ def create_app(rt, tokens=None):
         rid = store.put("known", doc, who.name, f"remove snooze {sid}")
         rt.changed()
         return {"rev": rid}
+
+    # ------------------------------------------------------------ ujdonsag-eszlelo (jelentes mod)
+    @app.get("/api/v1/novelty")
+    def novelty_list(status: str = Query("open", pattern="^(open|dismissed|all)$"), limit: int = Query(100, ge=1, le=500),
+                     _: Actor = Depends(read)):
+        """Uj mintak es gyakorisag-ugrasok a naplokban + a detektor allapota (alapvonal, utolso futas, hiba)."""
+        return {"status": novelty.status(store), "findings": store.nov_findings(None if status == "all" else status, limit=limit)}
+
+    @app.post("/api/v1/novelty/dismiss-all")
+    def novelty_dismiss_all(who: Actor = Depends(admin)):
+        return {"dismissed": store.nov_dismiss(None, who.name)}
+
+    @app.post("/api/v1/novelty/{fid}/dismiss")
+    def novelty_dismiss(fid: int, who: Actor = Depends(admin)):
+        n = store.nov_dismiss(fid, who.name)
+        if not n:
+            raise HTTPException(404, f"no open finding {fid}")
+        return {"dismissed": n}
 
     # ------------------------------------------------------------ feladatok, audit
     @app.post("/api/v1/jobs/digest")

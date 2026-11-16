@@ -31,6 +31,12 @@ SPEC = {
     "NOTIFY_DIGEST": {"type": "choice", "choices": CHOICES_NOTIFY_DIGEST, "desc": "Daily digest notification: always | issues (only if there are issues) | off."},
     "NOTIFY_TIMEOUT": {"type": "int", "min": 1, "max": 30, "desc": "Per-attempt notification timeout (s)."},
     "HEARTBEAT_S": {"type": "int", "min": 0, "max": 3600, "desc": "Heartbeat event interval (s); alert rules watch it. 0 = off."},
+    "NOVELTY_MODE": {"type": "choice", "choices": ["off", "report"], "desc": "New-pattern / rate-spike detection: off | report (shown on the Status page and in the digest; no notifications)."},
+    "NOVELTY_INTERVAL_MIN": {"type": "int", "min": 5, "max": 240, "desc": "How often new log lines are scanned for new patterns (minutes)."},
+    "NOVELTY_BACKFILL_DAYS": {"type": "int", "min": 0, "max": 14, "desc": "Baseline pre-filled from this many days of stored logs on first start (0 = none)."},
+    "NOVELTY_LEARN_HOURS": {"type": "int", "min": 0, "max": 168, "desc": "Learning period without findings when no history could be loaded (hours)."},
+    "NOVELTY_SPIKE_FACTOR": {"type": "int", "min": 2, "max": 1000, "desc": "Report a rate spike when a pattern is this many times more frequent than its own average."},
+    "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
 }
 
 _URL_RX = re.compile(r"^https?://[^/\s]+$")

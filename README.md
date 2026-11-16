@@ -22,6 +22,10 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
 - **It shows what it reviewed**: every digest/incident records how many log lines were in the window (per source), how many warning/error-like
   lines it checked, how many the noise rules / snoozes / known issues removed and what reached the model. The Status page shows the last check,
   a history table and a stacked log-volume chart (messages per bucket straight from VictoriaLogs, by source type or by host; plain inline SVG).
+- **It notices what no rule covers**: a detector (plain code, no LLM) turns every log line into a template (numbers collapsed), remembers when each template was
+  first/last seen and how often, and reports **new patterns** (never seen before) and **rate spikes** (many times the pattern's own average). The baseline is
+  pre-filled from the stored logs on first start, so day one is not a flood of "new". Noise rules, snoozes and known issues apply to it too. It runs in
+  *report* mode: findings appear on the Status page (with "+ noise" and "Dismiss") and as a section of the daily digest input; nothing is notified.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
@@ -36,7 +40,7 @@ Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens
 
 | Page | What it does |
 |---|---|
-| Status | LLM endpoints (up/down, backoff), queue, next digest; **what the last check reviewed**, log-volume chart, recent checks; last digest / incident with issues; admin: run a digest now, send a test notification |
+| Status | LLM endpoints (up/down, backoff), queue, next digest; **new patterns & rate spikes**; **what the last check reviewed**, log-volume chart, recent checks; last digest / incident with issues; admin: run a digest now, send a test notification |
 | Noise & known issues | Edit lab context, noise regexes and known issues; **snooze** a line from the dry-run list (immediately for admin, as a proposal for a read token). **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
 | Settings | All editable settings with their defaults; only differences are stored |
 | Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
@@ -57,6 +61,8 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /proposals[/{id}]` (read), `POST /proposals/{id}/approve?force=` / `reject` (admin) | review (with diff); stale proposals need `force` |
 | `GET /stats/volume?hours=24&by=pipeline` (read) | log message counts per time bucket for a stacked chart; `hours` 6/24/72/168, `by` `pipeline`/`host` (60 s cache) |
 | `GET /stats/runs?kind=digest&limit=14` (read) | recent checks with their "what was reviewed" statistics (from the `pipeline:ai` events in VictoriaLogs) |
+| `GET /novelty?status=open&limit=100` (read) | new-pattern / rate-spike findings plus the detector state (baseline size, last scan, errors); `status` `open`/`dismissed`/`all` |
+| `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (admin) | mark findings as reviewed |
 | `GET /snoozes` (read) | temporary mutes with `active` and `remaining_s` |
 | `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |
 | `DELETE /snoozes/{id}` (admin) | un-mute / remove an expired entry |

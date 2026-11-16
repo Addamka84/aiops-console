@@ -317,6 +317,35 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/health").status_code, 200)
         self.assertIn("last_digest", self.c.get("/last").json())
 
+    def test_novelty_endpoints(self):
+        self.assertEqual(self.c.get("/api/v1/novelty").status_code, 401)
+        st = self.rt.store
+        st.nov_add_findings([{"ts": "2026-11-16T06:00:00Z", "kind": "new", "key": "k1", "source": "docker", "host": "h", "ident": "app",
+                              "level": "error", "tmpl": "boom <N>", "hits": 3, "baseline": 0},
+                             {"ts": "2026-11-16T06:05:00Z", "kind": "spike", "key": "k2", "source": "syslog", "host": "h", "ident": "x",
+                              "level": "info", "tmpl": "noisy", "hits": 900, "baseline": 4.5}])
+        r = self.c.get("/api/v1/novelty", headers=self.R)
+        self.assertEqual(r.status_code, 200, r.text)
+        j = r.json()
+        self.assertEqual(len(j["findings"]), 2)
+        self.assertEqual((j["status"]["open_findings"], j["status"]["mode"] in ("off", "report")), (2, True))
+        self.assertEqual(self.c.get("/api/v1/novelty?status=bogus", headers=self.R).status_code, 422)
+        fid = j["findings"][0]["id"]
+        self.assertEqual(self.c.post(f"/api/v1/novelty/{fid}/dismiss", headers=self.R).status_code, 403)   # olvaso token nem intezhet el
+        self.assertEqual(self.c.post(f"/api/v1/novelty/{fid}/dismiss", headers=self.A).status_code, 200)
+        self.assertEqual(self.c.post(f"/api/v1/novelty/{fid}/dismiss", headers=self.A).status_code, 404)  # mar elintezett
+        self.assertEqual(len(self.c.get("/api/v1/novelty", headers=self.R).json()["findings"]), 1)
+        self.assertEqual(len(self.c.get("/api/v1/novelty?status=all", headers=self.R).json()["findings"]), 2)
+        self.assertEqual(self.c.post("/api/v1/novelty/dismiss-all", headers=self.A).json()["dismissed"], 1)
+        self.assertEqual(self.c.get("/api/v1/novelty", headers=self.R).json()["findings"], [])
+
+    def test_novelty_settings_are_editable(self):
+        r = self.c.put("/api/v1/config/settings", headers=self.A, json={"content": {"NOVELTY_MODE": "off", "NOVELTY_SPIKE_FACTOR": 50}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((aiops.CFG["NOVELTY_MODE"], aiops.CFG["NOVELTY_SPIKE_FACTOR"]), ("off", 50))
+        bad = self.c.put("/api/v1/config/settings", headers=self.A, json={"content": {"NOVELTY_MODE": "alert"}})
+        self.assertEqual(bad.status_code, 422)
+
     def test_stats_endpoints(self):
         self.assertEqual(self.c.get("/api/v1/stats/volume").status_code, 401)
         calls = []
