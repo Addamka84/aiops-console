@@ -73,7 +73,7 @@ CFG = {
     "NOVELTY_SPIKE_FACTOR": _env_int("NOVELTY_SPIKE_FACTOR", 20),               # a minta gyakorisaga a sajat atlaganak ennyiszerese
     "NOVELTY_SPIKE_MIN": _env_int("NOVELTY_SPIKE_MIN", 500),                    # ... es legalabb ennyi sor egy ablakban
 }
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -93,7 +93,9 @@ A pre-filter has already removed known-harmless noise from the input. If the inp
 If nothing else looks wrong, return an empty issues list and all_clear=true."""
 
 INCIDENT_PROMPT_EXTRA = """
-This window was selected because an alert fired. Explain the alert using the correlated log lines, name the most likely root cause and the affected hosts. The alert itself must appear as an issue."""
+This window was selected because an alert fired. Explain the alert using the correlated log lines, name the most likely root cause and the affected hosts. The alert itself must appear as an issue.
+Severity must follow the ACTUAL log lines, never the alert's name or words in it (e.g. "critical", "kritikus"). If the lines behind the alert are not shown in the input, say the cause is unknown and use severity low; do not guess a kernel panic or hardware failure.
+Do not claim a causal link between different hosts or services unless the logs show it (same time AND a shared dependency such as NFS or DNS). Report unrelated problems as separate low-severity issues, or leave them out."""
 
 SCHEMA = {
     "type": "object",
@@ -671,10 +673,74 @@ def review_stats(known, raw, t_from, t_to):
     return stats
 
 
+SAFE_LABEL = re.compile(r"^[A-Za-z0-9_.:@-]{1,80}$")
+
+
+def alert_labels(alerts_json, alertname="", limit=4):
+    """Az Alertmanager-webhook 'alerts' mezojebol a riasztasonkenti cimkek (legfeljebb `limit`; csak a host / azonosito jellegu mezok)."""
+    try:
+        arr = json.loads(alerts_json) if alerts_json else []
+    except (TypeError, ValueError):
+        arr = []
+    out = []
+    for a in arr if isinstance(arr, list) else []:
+        lab = a.get("labels") if isinstance(a, dict) else None
+        if isinstance(lab, dict):
+            out.append({k: str(lab[k])[:80] for k in ("alertname", "host", "SYSLOG_IDENTIFIER", "appname") if k in lab})
+        if len(out) >= limit:
+            break
+    if not out and alertname:
+        out.append({"alertname": alertname})
+    return out
+
+
+def alert_evidence(job, known, t_from, t_to):
+    """A riasztas mogotti tenyleges naplosorok (jelenleg: JournaldCritical -> a host/azonosito >=err sorai). A zajszabaly / snooze /
+    ismert ugy ezekre is hat. -> {"kept": [sorok], "suppressed": N, "total": N} vagy None (nem tamogatott riasztas, vagy a lekerdezes
+    nem sikerult: ilyenkor a regi viselkedes marad, az incidens nem akad el)."""
+    targets = [lab for lab in job.get("alert_labels", []) if lab.get("alertname") == "JournaldCritical"
+               and SAFE_LABEL.match(lab.get("host", "")) and SAFE_LABEL.match(lab.get("SYSLOG_IDENTIFIER", ""))]
+    if not targets:
+        return None
+    kept, suppressed, total = [], 0, 0
+    try:
+        for lab in targets:
+            q = (f'_time:[{iso(t_from)}, {iso(t_to)}] _HOSTNAME:"{lab["host"]}" SYSLOG_IDENTIFIER:"{lab["SYSLOG_IDENTIFIER"]}" '
+                 f"PRIORITY:in(0,1,2,3) | collapse_nums | stats by (_msg) count() as hits | sort by (hits desc) | limit 8")
+            for x in vl_query(q):
+                try:
+                    n = int(x.get("hits", 0) or 0)
+                except ValueError:
+                    n = 0
+                msg = str(x.get("_msg", ""))
+                total += n
+                if known.classify_idx(f"{lab['host']} | {lab['SYSLOG_IDENTIFIER']} | {msg}")[0] == "keep":
+                    kept.append(f"{lab['host']} | {lab['SYSLOG_IDENTIFIER']} | {n}x | {cut(msg, 200)}")
+                else:
+                    suppressed += n
+    except (OSError, ValueError) as e:
+        log(f"riasztas-bizonyitek lekerdezese sikertelen: {e}", key="alert_evidence")
+        return None
+    return {"kept": kept, "suppressed": suppressed, "total": total}
+
+
 def run_job(job, known, pool, dry_run=False):
     """Egy munka lefuttatasa. -> 'done' | 'retry' (nincs vegpont / hiba) | 'dropped'"""
     t_from = dt.datetime.strptime(job["window_from"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     t_to = dt.datetime.strptime(job["window_to"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    evidence = alert_evidence(job, known, t_from, t_to) if job["kind"] == "incident" else None
+    if evidence is not None and evidence["total"] > 0 and not evidence["kept"]:
+        # Minden, a riasztast kivalto sor zaj / snooze / ismert ugy: nincs modellhivas, nincs ertesites (a konzol zajlistaja a riasztasra is hat).
+        reason = f"all {evidence['suppressed']} triggering log lines are covered by noise rules, snoozes or known issues"
+        log(f"incidens kihagyva ({job.get('key', '')}): {reason}")
+        if not dry_run:
+            try:
+                vl_insert([{"_time": iso(utcnow()), "pipeline": "ai", "kind": "incident_skipped", "alert": job.get("alert_text", ""),
+                            "alert_key": job.get("key", ""), "reason": reason, "_msg": f"[aiops] incident skipped: {reason}"}])
+            except OSError as e:
+                log(f"VictoriaLogs iras sikertelen: {e}", key="vl_insert")
+        STATUS["last_skipped_incident"] = {"at": iso(utcnow()), "alert": job.get("alert_text", ""), "reason": reason}
+        return "done"
     ep = pool.pick()
     if ep is None:
         return "retry"
@@ -685,6 +751,13 @@ def run_job(job, known, pool, dry_run=False):
     if job["kind"] == "incident":
         system += INCIDENT_PROMPT_EXTRA
         extra = ["== ALERT that triggered this analysis:", cut(job.get("alert_text", ""), 300)]
+        if evidence is not None and evidence["kept"]:
+            extra.append("== Log lines behind the alert (host | source | count | message):")
+            extra.extend(evidence["kept"])
+            if evidence["suppressed"]:
+                extra.append(f"({evidence['suppressed']} more lines behind the alert were removed as known-harmless.)")
+        elif job.get("alert_labels") and any(lab.get("alertname") == "JournaldCritical" for lab in job["alert_labels"]):
+            extra.append("== The log lines behind the alert could NOT be retrieved: the cause is unknown.")
     elif DIGEST_EXTRAS is not None:
         try:
             extra = DIGEST_EXTRAS(t_from, t_to) or None  # pl. az ujdonsag-eszlelo leletei; a hiba nem rontja el a munkat
@@ -888,7 +961,7 @@ def poll_incidents(state, now):
         last += dt.timedelta(seconds=1)  # regi (masodperc-pontossagu) allapot: az utolso esemenyt ne dolgozzuk fel ujra
     since = iso_us(last + dt.timedelta(microseconds=1))
     try:
-        rows = vl_query(f'_time:>{since} appname:=alert alert_status:firing | sort by (_time) | fields _time, alertname, alert_root, alert_count, _msg')
+        rows = vl_query(f'_time:>{since} appname:=alert alert_status:firing | sort by (_time) | fields _time, alertname, alert_root, alert_count, alerts, _msg')
     except (OSError, ValueError) as e:
         log(f"VictoriaLogs lekerdezes sikertelen (riasztasok): {e}", key="vl_alerts")
         return
@@ -912,6 +985,7 @@ def poll_incidents(state, now):
         state["incident_times"].append(time.time())
         state["pending"].append({
             "kind": "incident", "created": time.time(), "attempts": 0, "key": key, "alert_text": r.get("_msg", ""),
+            "alert_labels": alert_labels(r.get("alerts", ""), r.get("alertname", "")),
             "window_from": iso(now - dt.timedelta(minutes=CFG["INCIDENT_LOOKBACK_MIN"])), "window_to": iso(now),
         })
         log(f"incidens utemezve: {key}")

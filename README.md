@@ -27,6 +27,10 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   pre-filled from the stored logs on first start, so day one is not a flood of "new". Container-style ids (`veth<hex>`, short hashes, `56AM` times) are
   collapsed into the template, so a container restart is a handful of patterns, not dozens. Noise rules, snoozes and known issues apply to it too. It runs in
   *report* mode: findings appear on the Status page (with "+ noise" and "Dismiss") and as a section of the daily digest input; nothing is notified.
+- **Incidents are grounded in the real log lines**: for an alert it understands (`JournaldCritical` so far) the service fetches the lines behind the alert
+  and puts them in the model input; if all of them are covered by noise rules, snoozes or known issues, the incident is skipped (no model call, no
+  notification; a `pipeline:ai kind:incident_skipped` event records why). The prompt forbids taking the severity from the alert's name and inventing
+  causal links between unrelated hosts.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
