@@ -17,12 +17,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from store import Store  # noqa: E402
 
 DOC = {"assets": [
-    {"id": "switch", "name": "core-switch", "kind": "network", "ip": "192.168.31.1", "role": "main switch", "criticality": "high"},
-    {"id": "homenas2", "kind": "host", "ip": "192.168.31.172", "role": "OpenMediaVault NAS, NFS server", "criticality": "high",
+    {"id": "switch", "name": "core-switch", "kind": "network", "ip": "192.0.2.1", "role": "main switch", "criticality": "high"},
+    {"id": "homenas2", "kind": "host", "ip": "192.0.2.172", "role": "OpenMediaVault NAS, NFS server", "criticality": "high",
      "depends_on": [{"id": "switch", "type": "network"}]},
-    {"id": "homesrv", "kind": "host", "ip": "192.168.31.2", "role": "Portainer, AdGuard", "aliases": ["homesrv-main"],
+    {"id": "homesrv", "kind": "host", "ip": "192.0.2.2", "role": "Portainer, AdGuard", "aliases": ["homesrv-main"],
      "depends_on": [{"id": "switch", "type": "network"}, {"id": "homenas2", "type": "storage"}]},
-    {"id": "homesrv3", "kind": "host", "ip": "192.168.31.125", "role": "media server",
+    {"id": "homesrv3", "kind": "host", "ip": "192.0.2.125", "role": "media server",
      "depends_on": [{"id": "switch", "type": "network"}, {"id": "homenas2", "type": "storage", "note": "hard NFS"}]},
     {"id": "plex", "kind": "container", "role": "Plex", "runs_on": "homesrv3", "aliases": ["plex-server"]},
     {"id": "adguard", "kind": "container", "role": "home DNS", "runs_on": "homesrv", "criticality": "high",
@@ -84,14 +84,14 @@ class MatchTests(unittest.TestCase):
 
     def test_names_aliases_and_ips_match(self):
         self.assertEqual(self.t.match(["nfs: server <N> not responding on homenas2"]), ["homenas2"])
-        self.assertEqual(self.t.match(["root=192.168.31.172"]), ["homenas2"])
+        self.assertEqual(self.t.match(["root=192.0.2.172"]), ["homenas2"])
         self.assertEqual(self.t.match(["adguard-adguardhome-1 error"]), ["adguard"])
         self.assertEqual(self.t.match(["HOMESRV-MAIN down"]), ["homesrv"])    # kis/nagybetu mindegy
         self.assertEqual(self.t.match(["core-switch port flap"]), ["switch"])
 
     def test_no_partial_word_or_ip_matches(self):
         self.assertEqual(self.t.match(["homesrv3 rebooted"]), ["homesrv3"])           # nem 'homesrv'
-        self.assertEqual(self.t.match(["host homesrvx", "9192.168.31.2", "192.168.31.25"]), [])
+        self.assertEqual(self.t.match(["host homesrvx", "9192.0.2.2", "192.0.2.25"]), [])
         self.assertEqual(self.t.match(["subhomenas2 other.homenas2"]), [])
 
     def test_order_is_by_first_mention_and_limited(self):
@@ -113,7 +113,7 @@ class SectionTests(unittest.TestCase):
         text = "\n".join(sec)
         self.assertTrue(sec[0].startswith("== Topology"))
         self.assertIn("plex (container) - Plex | depends on: homesrv3 (runtime)", text)
-        self.assertIn("homesrv3 (host, 192.168.31.125)", text)          # a futtato host
+        self.assertIn("homesrv3 (host, 192.0.2.125)", text)          # a futtato host
         self.assertIn("homenas2", text)                                  # ketto szint: plex -> homesrv3 -> homenas2
         self.assertIn("needed by: homesrv (storage), homesrv3 (storage)", text)
 
@@ -183,13 +183,13 @@ class InputTests(unittest.TestCase):
         aiops.TOPOLOGY = topology.Topology(DOC)
         text = self.build()
         self.assertIn("== Topology", text)
-        self.assertIn("homenas2 (host, 192.168.31.172)", text)
+        self.assertIn("homenas2 (host, 192.0.2.172)", text)
         self.assertIn("plex (container)", text)
         self.assertNotIn("adguard (container)", text)
 
     def test_the_alert_text_comes_first(self):
         aiops.TOPOLOGY = topology.Topology(DOC)
-        text = self.build(["== ALERT that triggered this analysis:", "NFS server 192.168.31.172 not responding (homesrv)"])
+        text = self.build(["== ALERT that triggered this analysis:", "NFS server 192.0.2.172 not responding (homesrv)"])
         topo = text.split("== Topology")[1].split("== ALERT")[0]
         self.assertLess(topo.index("homenas2 (host"), topo.index("plex (container"))   # a riasztasban szereplo eszkoz elol van
 
@@ -258,7 +258,7 @@ class ApiTests(unittest.TestCase):
 
     def test_try_it_endpoint(self):
         self.c.put("/api/v1/config/topology", headers=self.A, json={"content": DOC, "comment": "seed"})
-        r = self.c.post("/api/v1/test/topology", headers=self.R, json={"text": "nfs: server 192.168.31.172 not responding on homesrv3"})
+        r = self.c.post("/api/v1/test/topology", headers=self.R, json={"text": "nfs: server 192.0.2.172 not responding on homesrv3"})
         self.assertEqual(r.status_code, 200, r.text)
         j = r.json()
         self.assertEqual(j["matched"], ["homenas2", "homesrv3"])
