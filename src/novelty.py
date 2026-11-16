@@ -36,7 +36,7 @@ RETAIN_PATTERNS_DAYS = 60
 RETAIN_FINDINGS_DAYS = 30
 MAX_BACKFILL_FAILS = 5
 
-NORM_VERSION = 2         # a sablonkepzes verzioja: valtozasakor a tarolt mintak egyszer ujrakulcsolodnak (_migrate)
+NORM_VERSION = 3         # a sablonkepzes verzioja: valtozasakor a tarolt mintak egyszer ujrakulcsolodnak (_migrate)
 MAX_PATTERNS = 250000
 
 # A VictoriaLogs collapse_nums csak a szamokat vonja ossze; a hexa azonositok (konteneres veth-nevek, rovid hash-ek) es a "56AM"
@@ -44,11 +44,21 @@ MAX_PATTERNS = 250000
 _VETH_RX = re.compile(r"\bveth[0-9a-f]{6,}")
 _ID_RX = re.compile(r"(?<![\w<])(?:[0-9a-f]|<N>){7,}(?![\w>])")
 _AMPM_RX = re.compile(r"\b\d+(AM|PM)\b")
+_ANSI_RX = re.compile(r"\x1b?\[(?:<N>|\d+)(?:;(?:<N>|\d+))*m")           # szinkodok (a szamok mar <N>-re vonva lehetnek; az ESC lehet lathatatlan)
+_BAR_RX = re.compile(r"\[[=>\- ]{5,}\]")                                  # elorehaladas-jelzo: [=====>    ]
+_DECIMAL_RX = re.compile(r"(?<=<N>)\.\d+")                               # a collapse_nums utan maradt tizedes: <N>.67kB
+_NODE_RX = re.compile(r"(@<N>:)[0-9a-f]{1,3}(?=•)")                     # Matter csomopont/vegpont-azonosito: @<N>:1a•
 
 
 def normalize(tmpl):
-    """A VictoriaLogs-sablon tovabbi egyszerusitese: veth<ID>, hexa azonositok -> <ID>, <szam>AM/PM -> <N>AM/PM."""
-    t = _VETH_RX.sub("veth<ID>", tmpl)
+    """A VictoriaLogs-sablon tovabbi egyszerusitese: szinkodok, elorehaladas-jelzok es tizedesek eltavolitasa/osszevonasa,
+    veth<ID>, hexa azonositok -> <ID>, <szam>AM/PM -> <N>AM/PM."""
+    t = tmpl.lstrip("﻿")
+    t = _ANSI_RX.sub("", t)
+    t = _BAR_RX.sub("[<BAR>]", t)
+    t = _DECIMAL_RX.sub("", t)
+    t = _NODE_RX.sub(r"\1<ID>", t)
+    t = _VETH_RX.sub("veth<ID>", t)
     # azonosito csak akkor, ha szamjegyet (vagy <N>-t) tartalmaz: igy az "added", "decade" tipusu szavak nem esnek ide
     t = _ID_RX.sub(lambda m: "<ID>" if re.search(r"\d|<N>", m.group(0)) else m.group(0), t)
     return _AMPM_RX.sub(r"<N>\1", t)

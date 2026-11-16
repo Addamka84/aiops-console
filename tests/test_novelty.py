@@ -65,6 +65,17 @@ class NormalizeTests(Base):
         self.assertEqual(n("layer 3a9f1c7d2b04 done"), "layer <ID> done")
         self.assertEqual(n("sha256:<N>a<N>f<N>c<N>d<N> ok"), "sha256:<ID> ok")
 
+    def test_colour_codes_progress_bars_and_decimals(self):
+        n = novelty.normalize
+        self.assertEqual(n("﻿<N>-<N>-<N> INFO [<N>;<N>;<N>mClientInteraction Invoke [<N>;<N>mstatus: [<N>;<N>mSuccess"),
+                         "<N>-<N>-<N> INFO ClientInteraction Invoke status: Success")
+        self.assertEqual(n("x \x1b[<N>;<N>mred\x1b[<N>m y"), "x red y")
+        self.assertEqual(n("a Downloading [=======>     ] <N>.5kB/<N>.592MB"), "a Downloading [<BAR>] <N>kB/<N>MB")
+        self.assertEqual(n("Extracting [==================================================>] <N>.67kB/<N>.67kB"), "Extracting [<BAR>] <N>kB/<N>kB")
+        self.assertEqual(n("@<N>:1a•<N>⇵<N> on"), "@<N>:<ID>•<N>⇵<N> on")
+        self.assertEqual(n("@<N>:1b•<N>⇵<N> on"), "@<N>:<ID>•<N>⇵<N> on")        # a ket csomopont ugyanaz a minta
+        self.assertEqual(n("version v<N>.<N>.<N> [ok]"), "version v<N>.<N>.<N> [ok]")  # a verziokat nem bantja
+
     def test_plain_words_and_numbers_are_left_alone(self):
         n = novelty.normalize
         for s in ("added decade defaced feed", "Error <N> at <N>:<N>:<N>", "disk full on sda<N>", "version <N>.<N>.<N>", "cafe deadbeef"):

@@ -114,8 +114,27 @@ class SectionTests(unittest.TestCase):
         self.assertTrue(sec[0].startswith("== Topology"))
         self.assertIn("plex (container) - Plex | depends on: homesrv3 (runtime)", text)
         self.assertIn("homesrv3 (host, 192.0.2.125)", text)          # a futtato host
-        self.assertIn("homenas2", text)                                  # ketto szint: plex -> homesrv3 -> homenas2
-        self.assertIn("needed by: homesrv (storage), homesrv3 (storage)", text)
+        self.assertIn("homenas2 (storage)", text)                        # a host sorabol latszik, hogy mitol fugg
+        self.assertNotIn("\nhomenas2 (host", text)                       # de a futtato host fuggosegeire nem terjeszkedunk (runtime el)
+        nas = "\n".join(self.t.section(["homenas2"]))                    # ha maga a NAS a keresett eszkoz: a fuggoi (needed by) latszanak
+        self.assertIn("needed by: homesrv (storage), homesrv3 (storage)", nas)
+
+    def test_real_dependencies_expand_two_levels_but_runtime_edges_do_not(self):
+        doc = {"assets": [
+            {"id": "internet", "kind": "network"}, {"id": "router", "kind": "network", "depends_on": [{"id": "internet", "type": "network"}]},
+            {"id": "ha", "kind": "host", "depends_on": [{"id": "router", "type": "network"}, {"id": "nas", "type": "storage"}]},
+            {"id": "nas", "kind": "host"},
+            {"id": "cloud-int", "kind": "service", "runs_on": "ha", "depends_on": [{"id": "internet", "type": "network"}]},
+            {"id": "svc-a", "kind": "service", "depends_on": [{"id": "router", "type": "network"}]}]}
+        t = topology.Topology(doc)
+        text = "\n".join(t.section(["cloud-int"]))
+        self.assertIn("internet (network)", text.split("\n")[1])          # a kozvetlen (felho) fuggoseg benne van
+        self.assertIn("\nha (host)", text)                                # a futtato host is benne van...
+        self.assertNotIn("\nnas (host)", text)                           # ...de annak fuggosegei (runtime el utan) nem
+        self.assertNotIn("\nrouter (network)", text)
+        text2 = "\n".join(t.section(["svc-a"]))
+        self.assertIn("\nrouter (network)", text2)
+        self.assertIn("\ninternet (network)", text2)                      # valodi (nem runtime) el: ket szint
 
     def test_hosted_containers_are_listed_apart_from_real_dependents(self):
         text = "\n".join(self.t.section(["homesrv3"]))

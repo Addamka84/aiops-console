@@ -172,10 +172,11 @@ class Topology:
         for _ in range(2):  # fuggosegek: legfeljebb 2 szintig felfele
             nxt = []
             for aid in frontier:
-                for dep, _t in self.up[aid]:
+                for dep, typ in self.up[aid]:
                     if dep not in order:
                         order.append(dep)
-                        nxt.append(dep)
+                        if typ != "runtime":     # a futtato hostot felvesszuk, de annak sajat fuggosegeire nem terjeszkedunk (zaj lenne)
+                            nxt.append(dep)
             frontier = nxt
         lines, size = [], 0
         for n, aid in enumerate(order):
