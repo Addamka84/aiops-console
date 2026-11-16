@@ -56,6 +56,53 @@ def dock(msg, hits=3, host="h3", app="plex"):
     return {"host": host, "appname": app, "_msg": msg, "hits": str(hits)}
 
 
+class NormalizeTests(Base):
+    def test_container_ids_and_times_are_collapsed(self):
+        n = novelty.normalize
+        self.assertEqual(n("vethdab6adf: Link UP"), "veth<ID>: Link UP")
+        self.assertEqual(n("br-<N>: port <N>(veth33bb392) entered blocking state"), "br-<N>: port <N>(veth<ID>) entered blocking state")
+        self.assertEqual(n("<N>/<N>/<N> <N>:56AM ??? pulled"), "<N>/<N>/<N> <N>:<N>AM ??? pulled")
+        self.assertEqual(n("layer 3a9f1c7d2b04 done"), "layer <ID> done")
+        self.assertEqual(n("sha256:<N>a<N>f<N>c<N>d<N> ok"), "sha256:<ID> ok")
+
+    def test_plain_words_and_numbers_are_left_alone(self):
+        n = novelty.normalize
+        for s in ("added decade defaced feed", "Error <N> at <N>:<N>:<N>", "disk full on sda<N>", "version <N>.<N>.<N>", "cafe deadbeef"):
+            self.assertEqual(n(s), s)
+
+    def test_two_ids_become_one_pattern(self):
+        self.rows["journald"] = [{"_HOSTNAME": "srv", "SYSLOG_IDENTIFIER": "kernel", "PRIORITY": "6", "_msg": "veth11111aa: Link UP", "hits": "1"},
+                                 {"_HOSTNAME": "srv", "SYSLOG_IDENTIFIER": "kernel", "PRIORITY": "6", "_msg": "vethbbbb222: Link UP", "hits": "1"}]
+        self.run_steps(None, 0, 20)
+        f = self.store.nov_findings("open")
+        self.assertEqual([(x["tmpl"], x["hits"]) for x in f], [("veth<ID>: Link UP", 2)])
+
+
+class MigrationTests(Base):
+    def test_stored_patterns_are_rekeyed_and_merged_once(self):
+        def row(tmpl, total, last):
+            return {"key": novelty._key({"source": "journald", "ident": "kernel", "tmpl": tmpl}), "source": "journald", "host": "srv",
+                    "ident": "kernel", "level": "info", "tmpl": tmpl, "first_seen": "2026-11-10T00:00:00Z", "last_seen": last,
+                    "total": total, "since": "2026-11-09T00:00:00Z", "last_spike": ""}
+        self.store.nov_upsert([row("vethaaaaaaa: Link UP", 5, "2026-11-15T00:00:00Z"), row("vethbbbbbbb: Link UP", 7, "2026-11-16T00:00:00Z"),
+                               row("plain message", 3, "2026-11-16T00:00:00Z")])
+        self.store.nov_set_meta("next_from", "2026-11-16T11:00:00Z")   # mar telepitett, regi (v1) allapot
+        self.run_steps(None, 0)
+        self.assertEqual(self.store.nov_counts()["patterns"], 2)
+        merged = self.store.nov_patterns([novelty._key({"source": "journald", "ident": "kernel", "tmpl": "veth<ID>: Link UP"})])
+        m = list(merged.values())[0]
+        self.assertEqual((m["total"], m["last_seen"]), (12, "2026-11-16T00:00:00Z"))
+        self.assertEqual(self.store.nov_meta("norm"), str(novelty.NORM_VERSION))
+        # masodszor mar nem fut le, es egy uj veth-nev nem 'uj' minta
+        self.rows["journald"] = [{"_HOSTNAME": "srv", "SYSLOG_IDENTIFIER": "kernel", "PRIORITY": "6", "_msg": "vethccccccc: Link UP", "hits": "1"}]
+        self.run_steps(None, 20)
+        self.assertEqual(self.store.nov_findings("open"), [])
+
+    def test_fresh_install_skips_the_migration(self):
+        self.run_steps(None, 0)
+        self.assertEqual(self.store.nov_meta("norm"), str(novelty.NORM_VERSION))
+
+
 class NewPatternTests(Base):
     def test_first_start_only_sets_the_cursor(self):
         self.run_steps(None, 0)

@@ -314,7 +314,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.c.get("/api/v1/audit", headers=self.A).status_code, 200)
         self.assertEqual(self.c.put("/api/v1/config/known", json={"content": {}}, headers=self.R).status_code, 403)
         # nyitott vegpontok (health, a UI statikus fajljai, regi /last JSON)
-        self.assertEqual(self.c.get("/api/v1/health").status_code, 200)
+        r_h = self.c.get("/api/v1/health")
+        self.assertEqual((r_h.status_code, r_h.json()["ok"], r_h.json()["version"]), (200, True, aiops.__version__))
         self.assertIn("last_digest", self.c.get("/last").json())
 
     def test_novelty_endpoints(self):

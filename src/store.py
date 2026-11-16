@@ -182,6 +182,36 @@ class Store:
             """, rows)
             self.db.commit()
 
+    def nov_rekey(self, fn):
+        """Az osszes minta ujrakulcsolasa: fn(sor) -> (uj_kulcs, uj_sablon). Az azonos uj kulcsra eso sorok osszevonodnak
+        (osszeg, legkorabbi/legkesobbi latas). Egy tranzakcio: hiba eseten semmi sem valtozik. -> (elotte, utana)"""
+        with self.lock:
+            rows = [dict(r) for r in self.db.execute("SELECT * FROM nov_patterns").fetchall()]
+            merged = {}
+            for r in rows:
+                key, tmpl = fn(r)
+                m = merged.get(key)
+                if m is None:
+                    merged[key] = dict(r, key=key, tmpl=tmpl)
+                    continue
+                newer = r["last_seen"] > m["last_seen"]
+                m.update(total=m["total"] + r["total"], first_seen=min(m["first_seen"], r["first_seen"]),
+                         last_seen=max(m["last_seen"], r["last_seen"]), since=min(m["since"], r["since"]),
+                         last_spike=max(m["last_spike"], r["last_spike"]))
+                if newer:
+                    m.update(host=r["host"], level=r["level"])
+            try:
+                self.db.execute("BEGIN")
+                self.db.execute("DELETE FROM nov_patterns")
+                self.db.executemany("""INSERT INTO nov_patterns (key, source, host, ident, level, tmpl, first_seen, last_seen, total, since, last_spike)
+                                       VALUES (:key,:source,:host,:ident,:level,:tmpl,:first_seen,:last_seen,:total,:since,:last_spike)""",
+                                    list(merged.values()))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return len(rows), len(merged)
+
     def nov_add_findings(self, items):
         with self.lock:
             self.db.executemany("""INSERT INTO nov_findings (ts, kind, key, source, host, ident, level, tmpl, hits, baseline)

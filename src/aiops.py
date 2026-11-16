@@ -73,7 +73,7 @@ CFG = {
     "NOVELTY_SPIKE_FACTOR": _env_int("NOVELTY_SPIKE_FACTOR", 20),               # a minta gyakorisaga a sajat atlaganak ennyiszerese
     "NOVELTY_SPIKE_MIN": _env_int("NOVELTY_SPIKE_MIN", 500),                    # ... es legalabb ennyi sor egy ablakban
 }
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 

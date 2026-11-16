@@ -36,6 +36,24 @@ RETAIN_PATTERNS_DAYS = 60
 RETAIN_FINDINGS_DAYS = 30
 MAX_BACKFILL_FAILS = 5
 
+NORM_VERSION = 2         # a sablonkepzes verzioja: valtozasakor a tarolt mintak egyszer ujrakulcsolodnak (_migrate)
+MAX_PATTERNS = 250000
+
+# A VictoriaLogs collapse_nums csak a szamokat vonja ossze; a hexa azonositok (konteneres veth-nevek, rovid hash-ek) es a "56AM"
+# tipusu idok szetszorodnanak, es minden ujrainditas "uj" mintakat szulne.
+_VETH_RX = re.compile(r"\bveth[0-9a-f]{6,}")
+_ID_RX = re.compile(r"(?<![\w<])(?:[0-9a-f]|<N>){7,}(?![\w>])")
+_AMPM_RX = re.compile(r"\b\d+(AM|PM)\b")
+
+
+def normalize(tmpl):
+    """A VictoriaLogs-sablon tovabbi egyszerusitese: veth<ID>, hexa azonositok -> <ID>, <szam>AM/PM -> <N>AM/PM."""
+    t = _VETH_RX.sub("veth<ID>", tmpl)
+    # azonosito csak akkor, ha szamjegyet (vagy <N>-t) tartalmaz: igy az "added", "decade" tipusu szavak nem esnek ide
+    t = _ID_RX.sub(lambda m: "<ID>" if re.search(r"\d|<N>", m.group(0)) else m.group(0), t)
+    return _AMPM_RX.sub(r"<N>\1", t)
+
+
 STATE = {"mode": "off", "last_scan": None, "next_from": None, "backfill": "", "error": "", "truncated": [],
          "learning_until": "", "last_new": 0, "last_spikes": 0}
 
@@ -72,7 +90,7 @@ def _fetch(src, t_from, t_to, limit, with_times, timeout):
             hits = int(r.get("hits", 0) or 0)
         except ValueError:
             continue
-        tmpl = aiops.cut(str(r.get("_msg", "")), 400)
+        tmpl = normalize(aiops.cut(str(r.get("_msg", "")), 400))
         if hits <= 0 or not tmpl.strip():
             continue
         out.append({"source": name, "host": str(r.get(hf, "")), "ident": str(r.get(idf, "")),
@@ -103,6 +121,16 @@ def _merge(rows):
 def _is_reportable(known, r, now):
     kind, _ = known.classify_idx(f"{r['host']} | {r['ident']} | {r['tmpl']}")  # a snooze-lejaratot maga szamolja
     return kind == "keep"
+
+
+def _migrate(store):
+    """Ha a sablonkepzes valtozott (NORM_VERSION), a tarolt mintak sablonjat ugyanugy egyszerusiti es ujrakulcsolja, hogy a valtozas
+    ne dobjon fel ujra minden erintett mintat 'ujkent'. Egyszeri; hiba eseten a kovetkezo kor ujraprobalja."""
+    if str(store.nov_meta("norm", "1")) == str(NORM_VERSION):
+        return
+    before, after = store.nov_rekey(lambda r: (_key(dict(r, tmpl=normalize(r["tmpl"]))), normalize(r["tmpl"])))
+    store.nov_set_meta("norm", NORM_VERSION)
+    aiops.log(f"ujdonsag-eszleles: sablonkepzes v{NORM_VERSION}, {before} minta -> {after}")
 
 
 # ---------------------------------------------------------------- alapvonal feltoltese (elozmenybol)
@@ -211,7 +239,7 @@ def _scan(store, known, now):
     store.nov_set_meta("next_from", aiops.iso(to))
     STATE["truncated"] = trunc
     STATE["last_scan"] = aiops.iso(now)
-    store.nov_prune(aiops.iso(now - dt.timedelta(days=RETAIN_PATTERNS_DAYS)), 100000,
+    store.nov_prune(aiops.iso(now - dt.timedelta(days=RETAIN_PATTERNS_DAYS)), MAX_PATTERNS,
                     aiops.iso(now - dt.timedelta(days=RETAIN_FINDINGS_DAYS)))
 
 
@@ -224,6 +252,7 @@ def step(store, known, now=None):
         return
     try:
         if not store.nov_meta("next_from"):
+            store.nov_set_meta("norm", NORM_VERSION)  # uj telepites: a minta mar az uj sablonkepzessel kerul be
             live_from = (now - dt.timedelta(seconds=VL_OFFSET_S + 30)).replace(microsecond=0)
             store.nov_set_meta("next_from", aiops.iso(live_from))
             days = aiops.CFG["NOVELTY_BACKFILL_DAYS"]
@@ -234,6 +263,7 @@ def step(store, known, now=None):
                     store.nov_set_meta(k, v)
             else:
                 store.nov_set_meta("learn_until", aiops.iso(now + dt.timedelta(hours=aiops.CFG["NOVELTY_LEARN_HOURS"])))
+        _migrate(store)
         STATE["next_from"] = store.nov_meta("next_from")
         STATE["backfill"] = store.nov_meta("backfill", "")
         STATE["learning_until"] = store.nov_meta("learn_until", "")

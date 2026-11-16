@@ -80,11 +80,18 @@ const isAdmin = () => S.role === 'admin';
 // ---------------------------------------------------------------- shell
 const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
 
+// The version comes from the open health endpoint, so it is also shown on the sign-in page.
+async function loadVersion() {
+  if (S.version) return;
+  try { const r = await fetch('/api/v1/health'); const j = await r.json(); S.version = (j && j.version) || ''; } catch (e) { /* the version is optional */ }
+}
+const verEl = () => (S.version ? h('span', { class: 'ver muted', title: 'aiops-console version' }, 'v' + S.version) : null);
+
 function renderShell(content) {
   const app = document.getElementById('app');
   app.replaceChildren(
     h('header', {}, h('div', { class: 'bar' },
-      h('span', { class: 'brand' }, 'aiops console'),
+      h('span', { class: 'brand' }, 'aiops console ', verEl()),
       h('nav', {}, TABS.map(([id, label]) => h('button', { class: S.tab === id ? 'on' : '', onclick: () => go(id) },
         label, id === 'proposals' && S.proposalsPending ? ' (' + S.proposalsPending + ')' : ''))),
       h('span', { class: 'badge ' + (isAdmin() ? 'b-up' : 'b-unknown'), title: S.actor }, S.role),
@@ -100,6 +107,7 @@ function signOut() { storage.del('token'); S.token = ''; S.role = null; clearInt
 
 async function render() {
   if (S.tab !== 'status' && S.timer) { clearInterval(S.timer); S.timer = null; }
+  await loadVersion();
   if (!S.token) return renderLogin();
   if (!S.role) {
     try {
@@ -127,7 +135,7 @@ function renderLogin(msg) {
   };
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') go_(); });
   document.getElementById('app').replaceChildren(h('div', { class: 'login panel' },
-    h('h2', {}, 'aiops console'),
+    h('h2', {}, 'aiops console ', verEl()),
     h('p', { class: 'muted' }, 'Enter your API token. It is kept for this browser tab only.'),
     msg ? h('div', { class: 'err' }, msg) : null,
     h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: go_ }, 'Sign in'))));

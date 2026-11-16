@@ -24,7 +24,8 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   a history table and a stacked log-volume chart (messages per bucket straight from VictoriaLogs, by source type or by host; plain inline SVG).
 - **It notices what no rule covers**: a detector (plain code, no LLM) turns every log line into a template (numbers collapsed), remembers when each template was
   first/last seen and how often, and reports **new patterns** (never seen before) and **rate spikes** (many times the pattern's own average). The baseline is
-  pre-filled from the stored logs on first start, so day one is not a flood of "new". Noise rules, snoozes and known issues apply to it too. It runs in
+  pre-filled from the stored logs on first start, so day one is not a flood of "new". Container-style ids (`veth<hex>`, short hashes, `56AM` times) are
+  collapsed into the template, so a container restart is a handful of patterns, not dozens. Noise rules, snoozes and known issues apply to it too. It runs in
   *report* mode: findings appear on the Status page (with "+ noise" and "Dismiss") and as a section of the daily digest input; nothing is notified.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
@@ -46,6 +47,7 @@ Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens
 | Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
 | History | Revisions with a diff against the current state and one-click rollback; audit log (admin) |
 
+The UI shows its version next to the title (from the open `GET /api/v1/health`, which also returns `{"ok": true, "version": "..."}`).
 The UI is three static files (no build step, no external resources, strict CSP; every value is rendered as text).
 Interactive API docs: `http://<host>:8095/docs`.
 

@@ -115,7 +115,7 @@ def create_app(rt, tokens=None):
     # ------------------------------------------------------------ nyitott (regi allapot-JSON kompatibilitas, health)
     @app.get("/api/v1/health", include_in_schema=False)
     def health():
-        return {"ok": True}
+        return {"ok": True, "version": aiops.__version__}
 
     # A UI statikus fajlok (nem tartalmaznak adatot; az adat az API-bol jon tokennel). Szigoru CSP: csak sajat forras.
     ui_types = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8", "index.html": "text/html; charset=utf-8"}
