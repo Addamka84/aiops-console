@@ -36,6 +36,11 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   appear in the alert and in the kept log lines, adds what they depend on (two levels) and what depends on them, and puts that as a short section into the
   input; the prompt allows a causal claim between devices only along a dependency path shown there. The UI shows what the model would get for any text,
   and compares the topology with the hosts and containers seen in the logs (new ones to add, silent ones to review) so it does not rot.
+- **Rules you edit in the UI (detectors)**: a log filter (LogsQL, no pipes) + a window + either "at least N matching lines" (optionally one firing per `host`/`appname`/...)
+  or "no matching line at all" (a silent source), a cooldown, and an action: *model triage* (a normal incident: the real lines behind the firing go into the
+  input, noise rules/snoozes/topology apply, and a rule whose lines are all noise is skipped), *notify directly* (HA webhook, no model) or *record only*.
+  The service evaluates them itself on its own thread. **Backtest before you save**: the UI replays the rule over the past 1-14 days and shows when and how
+  often it would have fired, which messages it matches and what the cooldown does, so a noisy rule never reaches production.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
@@ -52,6 +57,7 @@ Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens
 |---|---|
 | Status | LLM endpoints (up/down, backoff), queue, next digest; **new patterns & rate spikes**; **what the last check reviewed**, log-volume chart, recent checks; last digest / incident with issues; admin: run a digest now, send a test notification |
 | Noise & known issues | Edit lab context, noise regexes and known issues; **snooze** a line from the dry-run list (immediately for admin, as a proposal for a read token). **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
+| Detectors | The rules above: list with on/off, condition, action and live state (last check, last firing, errors); editor with templates (error burst, silent source, a message appeared) and the **backtest**; Preview diff / Save / Propose |
 | Topology | Devices table with an editor (kind, IP, role, log names, runs on, criticality, dependencies), **"what the model would get"** for any pasted alert or line, **coverage against the logs** with one-click "+ add", then Preview diff / Save / Propose |
 | Settings | All editable settings with their defaults; only differences are stored |
 | Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
@@ -77,6 +83,9 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (admin) | mark findings as reviewed |
 | `GET/PUT /config/topology` (read/admin), `POST /proposals` with `"key":"topology"` and `content` | the topology document `{"assets": [...]}` (validated: unique ids/names/aliases/IPs, references must exist); versioned like the other documents |
 | `POST /test/topology` (read) | `{"text": "...", "content": {...}?}`: the devices found in the text and the topology section the model would get (uses unsaved `content` if given) |
+| `GET/PUT /config/detectors` (read/admin), `POST /proposals` with `"key":"detectors"` and `content` | the detectors document `{"detectors": [{id, name, query, mode: count\|absent, threshold, window_min, group_by, cooldown_min, action: triage\|direct\|none, severity, enabled, note}]}` (validated, versioned, hot reload) |
+| `POST /test/detector` (read) | `{"detector": {...}, "hours": 168}`: backtest of a (possibly unsaved) detector over consecutive windows: `firings`, `events` (time, group, lines, fires/cooldown), `samples`, `no_match` |
+| `GET /detectors/status` (read) | per saved detector the last evaluation / hits / last firing / error, plus the recent firings from the log store |
 | `GET /topology/coverage?hours=168` (read) | hosts/containers seen in the logs but not in the topology (`unknown`) and topology hosts/containers not seen in the logs (`silent`); 2 min cache |
 | `GET /snoozes` (read) | temporary mutes with `active` and `remaining_s` |
 | `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |

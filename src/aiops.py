@@ -72,14 +72,20 @@ CFG = {
     "NOVELTY_LEARN_HOURS": _env_int("NOVELTY_LEARN_HOURS", 24),                 # ora: tanulasi idoszak, ha nincs elozetes alapvonal (nincs lelet)
     "NOVELTY_SPIKE_FACTOR": _env_int("NOVELTY_SPIKE_FACTOR", 20),               # a minta gyakorisaga a sajat atlaganak ennyiszerese
     "NOVELTY_SPIKE_MIN": _env_int("NOVELTY_SPIKE_MIN", 500),                    # ... es legalabb ennyi sor egy ablakban
+    # A kezelofeluletrol szerkesztheto detektorok (detectors.py)
+    "DETECTOR_MODE": os.environ.get("DETECTOR_MODE", "on"),                      # on | off
+    "DETECTOR_INTERVAL_S": _env_int("DETECTOR_INTERVAL_S", 60),                  # mp: ennyi idonkent ertekeli ki az osszes detektort
 }
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
 # A konzol (API/UI) parancsai a hatterszalnak: {"cmd": "digest", "hours": N} | {"cmd": "notify-test"}
 COMMANDS = queue.Queue()
 WAKE = threading.Event()  # a parancs azonnal felebreszti a ciklust
+DETECTORS = []          # a kezelofeluletrol szerkesztett detektorok (detectors.full() alakban; a runtime allitja)
+DETECTOR_STATUS = {}    # detektor-id -> {last_eval, last_hits, last_fired, error}
+DETECTOR_HITS = queue.Queue(maxsize=500)  # a detektor-szal talalatai a fo ciklusnak
 TOPOLOGY = None         # topology.Topology (a konzol runtime-ja allitja; None = nincs topologia)
 DIGEST_EXTRAS = None      # opcionalis hivhato (t_from, t_to) -> [sorok]: kiegeszito szakasz a napi osszefoglalo bemenetehez
 
@@ -731,6 +737,23 @@ def alert_evidence(job, known, t_from, t_to):
     """A riasztas mogotti tenyleges naplosorok (jelenleg: JournaldCritical -> a host/azonosito >=err sorai). A zajszabaly / snooze /
     ismert ugy ezekre is hat. -> {"kept": [sorok], "suppressed": N, "total": N} vagy None (nem tamogatott riasztas, vagy a lekerdezes
     nem sikerult: ilyenkor a regi viselkedes marad, az incidens nem akad el)."""
+    det = job.get("detector")
+    if det:  # a kezelofeluleten szerkesztett detektor tuzelt: a csoportra szukitett, a szuronek megfelelo sorok
+        if det.get("mode") == "absent":
+            return None
+        import detectors
+        kept, suppressed, total = [], 0, 0
+        try:
+            for x in detectors.evidence_rows(det, det.get("group", {}), t_from, t_to):
+                total += x["hits"]
+                if known.classify_idx(f"{x['host']} | {x['ident']} | {x['msg']}")[0] == "keep":
+                    kept.append(f"{x['host']} | {x['ident']} | {x['hits']}x | {cut(x['msg'], 200)}")
+                else:
+                    suppressed += x["hits"]
+        except (OSError, ValueError) as e:
+            log(f"detektor-bizonyitek lekerdezese sikertelen: {e}", key="alert_evidence")
+            return None
+        return {"kept": kept, "suppressed": suppressed, "total": total}
     targets = [lab for lab in job.get("alert_labels", []) if lab.get("alertname") == "JournaldCritical"
                and SAFE_LABEL.match(lab.get("host", "")) and SAFE_LABEL.match(lab.get("SYSLOG_IDENTIFIER", ""))]
     if not targets:
@@ -791,7 +814,8 @@ def run_job(job, known, pool, dry_run=False):
             extra.extend(evidence["kept"])
             if evidence["suppressed"]:
                 extra.append(f"({evidence['suppressed']} more lines behind the alert were removed as known-harmless.)")
-        elif job.get("alert_labels") and any(lab.get("alertname") == "JournaldCritical" for lab in job["alert_labels"]):
+        elif (job.get("alert_labels") and any(lab.get("alertname") == "JournaldCritical" for lab in job["alert_labels"])) \
+                or (job.get("detector") and job["detector"].get("mode") != "absent"):
             extra.append("== The log lines behind the alert could NOT be retrieved: the cause is unknown.")
     elif DIGEST_EXTRAS is not None:
         try:
@@ -1009,8 +1033,8 @@ def poll_incidents(state, now):
             last = t
         state["last_alert_ts"] = iso_us(last)
         key = f"{r.get('alertname', '')}|{r.get('alert_root', '')}"
-        last = state["recent_alert_keys"].get(key, 0)
-        if time.time() - last < 1800:
+        last_seen = state["recent_alert_keys"].get(key, 0)   # (nem 'last': az az utolso esemeny ideje, kulon valtozo kell)
+        if time.time() - last_seen < 1800:
             continue  # ugyanaz a riasztas 30 percen belul: nem triazsoljuk ujra
         state["incident_times"] = [t for t in state["incident_times"] if time.time() - t < 3600]
         if len(state["incident_times"]) >= CFG["MAX_INCIDENTS_PER_HOUR"]:
@@ -1024,6 +1048,51 @@ def poll_incidents(state, now):
             "window_from": iso(now - dt.timedelta(minutes=CFG["INCIDENT_LOOKBACK_MIN"])), "window_to": iso(now),
         })
         log(f"incidens utemezve: {key}")
+
+
+def poll_detectors(state, now):
+    """A detektor-szal talalatainak feldolgozasa: szuneteltetes (cooldown) csoportonkent, incidens-korlat, akcio (triage / direct / none).
+    A talalatok sora (DETECTOR_HITS) szalbiztos; az allapotot (state) csak a fo ciklus modositja."""
+    import detectors  # kesve: a detectors az aiops-ot importalja
+    for k in [k for k, t in state["recent_alert_keys"].items() if k.startswith("det:") and time.time() - t > 8 * 86400]:
+        del state["recent_alert_keys"][k]
+    handled = 0
+    while handled < 200:
+        try:
+            hit = DETECTOR_HITS.get_nowait()
+        except queue.Empty:
+            break
+        handled += 1
+        d, group = hit["detector"], hit["group"]
+        key = f"det:{d['id']}|{json.dumps(group, sort_keys=True, ensure_ascii=False)}"
+        if time.time() - state["recent_alert_keys"].get(key, 0) < d["cooldown_min"] * 60:
+            continue
+        text = detectors.describe(d, group, hit["hits"])
+        action = d["action"]
+        if action == "triage":
+            state["incident_times"] = [t for t in state["incident_times"] if time.time() - t < 3600]
+            if len(state["incident_times"]) >= CFG["MAX_INCIDENTS_PER_HOUR"]:
+                log("incidens-korlat elerve (ora), a detektor-talalat kimarad", key="incident_cap")
+                continue
+            state["incident_times"].append(time.time())
+            lookback = max(CFG["INCIDENT_LOOKBACK_MIN"], d["window_min"])
+            state["pending"].append({
+                "kind": "incident", "created": time.time(), "attempts": 0, "key": key, "alert_text": text, "alert_labels": [],
+                "detector": {"id": d["id"], "name": d["name"], "query": d["query"], "mode": d["mode"], "group": group,
+                             "window_min": d["window_min"]},
+                "window_from": iso(now - dt.timedelta(minutes=lookback)), "window_to": iso(now),
+            })
+        elif action == "direct":
+            send_notification({"kind": "detector", "severity": d["severity"], "title": f"AIOps detector: {d['name']}",
+                               "message": text[:700], "issue_count": 1, "all_clear": False, "model": ""})
+        state["recent_alert_keys"][key] = time.time()
+        DETECTOR_STATUS.setdefault(d["id"], {})["last_fired"] = iso(now)
+        log(f"detektor tuzelt: {d['id']} ({action}) {group}")
+        try:
+            vl_insert([{"_time": iso(utcnow()), "pipeline": "ai", "kind": "detector", "detector": d["id"], "name": d["name"], "action": action,
+                        "severity": d["severity"], "group": json.dumps(group, ensure_ascii=False), "hits": str(hit["hits"]), "_msg": text}])
+        except OSError as e:
+            log(f"VictoriaLogs iras sikertelen: {e}", key="vl_insert")
 
 
 def expire_jobs(state):
@@ -1091,6 +1160,8 @@ def service_loop(get_known, store=None):
         DIGEST_EXTRAS = lambda t_from, t_to: novelty.digest_lines(store, t_from, t_to)  # noqa: E731
         # Sajat szal: az elozmeny-feltoltes lassu VictoriaLogs-lekerdezesei ne tartsak fel az incidenseket, a digestet, az eletjelet.
         threading.Thread(target=novelty.run_loop, args=(store, get_known), daemon=True, name="novelty").start()
+        import detectors
+        threading.Thread(target=detectors.run_loop, daemon=True, name="detectors").start()
     log(f"aiops indul: modell {CFG['MODEL']}, vegpontok {CFG['OLLAMA_URLS']}, osszefoglalo {CFG['DIGEST_UTC']} UTC")
     last_poll = 0.0
     last_hb = None
@@ -1109,6 +1180,7 @@ def service_loop(get_known, store=None):
             if time.monotonic() - last_poll >= CFG["INCIDENT_POLL_S"]:
                 last_poll = time.monotonic()
                 poll_incidents(state, now)
+            poll_detectors(state, now)
             expire_jobs(state)
             if state["pending"]:
                 job = state["pending"][0]

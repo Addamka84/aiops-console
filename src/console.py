@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 import aiops
+import detectors
 import novelty
 import runtime
 import settings
@@ -53,6 +54,11 @@ class TestIn(BaseModel):
 class TopoTestIn(BaseModel):
     text: str = ""
     content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett topologia)
+
+
+class DetectorTestIn(BaseModel):
+    detector: dict
+    hours: int = 168
 
 
 class SnoozeIn(BaseModel):
@@ -158,7 +164,7 @@ def create_app(rt, tokens=None):
     def status(_: Actor = Depends(read)):
         s = dict(aiops.STATUS)
         s["config"] = {"known_rev": store.revision_id("known"), "settings_rev": store.revision_id("settings"),
-                       "topology_rev": store.revision_id("topology")}
+                       "topology_rev": store.revision_id("topology"), "detectors_rev": store.revision_id("detectors")}
         s["settings"] = settings.effective((store.current("settings") or {"content": {}})["content"])
         s["notify_configured"] = bool(aiops.CFG["HA_WEBHOOK_URL"])
         s["next_digest_utc"] = next_digest()
@@ -288,6 +294,34 @@ def create_app(rt, tokens=None):
                 raise HTTPException(502, f"VictoriaLogs query failed: {e}")
             cov_cache[hours] = (time.monotonic(), seen)
         return dict(topology.coverage(topo, seen), hours=hours, assets=len(topo.assets), seen=len(seen))
+
+    # ------------------------------------------------------------ detektorok: visszateszt es allapot
+    @app.post("/api/v1/test/detector")
+    def test_detector(body: DetectorTestIn, _: Actor = Depends(read)):
+        """Egy detektor (akar meg nem mentett) hatasa a mult `hours` orajara: mikor es hanyszor tuzelt volna, mintasorok."""
+        errs = detectors.validate({"detectors": [body.detector]})
+        if errs:
+            raise HTTPException(422, {"errors": errs})
+        if not 1 <= body.hours <= 336:
+            raise HTTPException(422, {"errors": ["hours must be between 1 and 336"]})
+        try:
+            return detectors.backtest(body.detector, body.hours)
+        except ValueError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        except OSError as e:
+            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+
+    @app.get("/api/v1/detectors/status")
+    def detectors_status(_: Actor = Depends(read)):
+        """A mentett detektorok eloallapota (utolso kiertekeles, talalatok, hiba) + a legutobbi tuzelesek a tarbol."""
+        out = {"mode": aiops.CFG["DETECTOR_MODE"], "interval_s": aiops.CFG["DETECTOR_INTERVAL_S"],
+               "detectors": [dict(aiops.DETECTOR_STATUS.get(d["id"], {}), id=d["id"], enabled=d["enabled"]) for d in aiops.DETECTORS], "recent": []}
+        try:
+            out["recent"] = aiops.vl_query("_time:30d pipeline:ai kind:detector | sort by (_time desc) | limit 25"
+                                           " | fields _time, detector, name, action, severity, group, hits", timeout=20)
+        except (OSError, ValueError):
+            out["recent_error"] = "VictoriaLogs unavailable"
+        return out
 
     # ------------------------------------------------------------ javaslatok (a felhasznalo hagyja jova)
     @app.post("/api/v1/proposals")

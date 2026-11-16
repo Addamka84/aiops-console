@@ -78,7 +78,7 @@ function diffEl(text) {
 const isAdmin = () => S.role === 'admin';
 
 // ---------------------------------------------------------------- shell
-const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
+const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['detectors', 'Detectors'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
 async function loadVersion() {
@@ -116,7 +116,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -322,7 +322,7 @@ async function pageStatus() {
           h('dt', {}, 'Next digest'), h('dd', {}, fmtTime(s.next_digest_utc)),
           h('dt', {}, 'Notifications'), h('dd', {}, s.notify_configured ? 'configured' : 'not configured (HA_WEBHOOK_URL)'),
           h('dt', {}, 'Last notification'), h('dd', {}, s.last_notify ? (s.last_notify.ok ? 'ok' : 'FAILED') + ' · ' + s.last_notify.kind + ' · ' + fmtTime(s.last_notify.at) : '-'),
-          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', settings #' + s.config.settings_rev))),
+          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', detectors #' + (s.config.detectors_rev || 0) + ', settings #' + s.config.settings_rev))),
       h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Actions'),
         isAdmin() ? h('div', { class: 'row' },
           h('span', { class: 'muted small' }, 'Digest over the last'), hoursInp, h('span', { class: 'muted small' }, 'h'),
@@ -685,6 +685,160 @@ function drawTopo() {
   ]);
 }
 
+// ---------------------------------------------------------------- detectors (log rules the service evaluates itself)
+const DET_DEFAULTS = { enabled: true, mode: 'count', threshold: 1, window_min: 15, cooldown_min: 60, action: 'triage', severity: 'medium' };
+const DET_ACTIONS = [['triage', 'Model triage (incident; notifies from the usual severity)'], ['direct', 'Notify directly (no model)'], ['none', 'Record only (Status page and log store)']];
+const DET_TEMPLATES = {
+  burst: { id: 'container-errors', name: 'Error burst in a container', query: 'pipeline:docker appname:"CONTAINER" _msg:~"(?i)(error|fatal|panic)"', group_by: [], threshold: 20, window_min: 15 },
+  silence: { id: 'source-silent', name: 'Source went silent', query: 'pipeline:syslog host:"HOSTNAME"', mode: 'absent', window_min: 30, action: 'direct', severity: 'high' },
+  message: { id: 'message-seen', name: 'A specific message appeared', query: '"Out of memory"', group_by: ['host'], threshold: 1, window_min: 15 },
+};
+S.det = null;
+const detNorm = (d) => ({ detectors: (d && d.detectors) || [] });
+const detFull = (d) => Object.assign({}, DET_DEFAULTS, d);
+async function loadDet() {
+  const [r, st] = await Promise.all([api('GET', '/api/v1/config/detectors'), api('GET', '/api/v1/detectors/status').catch(() => null)]);
+  const keep = S.det || {};
+  S.det = { rev: r.id, base: detNorm(r.content), draft: clone(detNorm(r.content)), edit: null, status: st, bt: null, btError: '', btHours: keep.btHours || 168, diff: null, comment: '', error: '' };
+}
+function detSummary(d) {
+  const f = detFull(d);
+  return f.mode === 'absent' ? 'no matching line for ' + f.window_min + ' min'
+    : '≥ ' + f.threshold + ' in ' + f.window_min + ' min' + ((f.group_by || []).length ? ' per ' + f.group_by.join(', ') : '');
+}
+function detEditStart(d, isNew) { S.det.edit = { isNew, orig: d.id, d: clone(detFull(d)) }; S.det.bt = null; S.det.btError = ''; drawDet(); }
+function detEditApply() {
+  const e = S.det.edit, d = e.d, list = S.det.draft.detectors;
+  if (!d.id) { toast('The id is required.', true); return; }
+  if (!d.name) d.name = d.id;
+  if (d.mode === 'absent') { d.group_by = []; }
+  const out = Object.assign({}, d);
+  for (const k of ['note']) { if (!out[k]) delete out[k]; }
+  if (!out.group_by || !out.group_by.length) delete out.group_by;
+  if (out.enabled === true) delete out.enabled;
+  for (const [k, v] of Object.entries(DET_DEFAULTS)) { if (out[k] === v && k !== 'enabled') delete out[k]; }
+  if (e.isNew) list.push(out); else list[list.findIndex((x) => x.id === e.orig)] = out;
+  S.det.edit = null; S.det.bt = null; S.det.diff = null;
+  drawDet();
+}
+async function detBacktest() {
+  S.det.btError = ''; S.det.bt = null;
+  const d = Object.assign({}, S.det.edit.d);
+  if (d.mode === 'absent') d.group_by = [];
+  try { S.det.bt = await api('POST', '/api/v1/test/detector', { detector: d, hours: S.det.btHours }); } catch (e) { S.det.btError = e.message; }
+  drawDet();
+}
+async function detDiff() {
+  try { S.det.diff = (await api('POST', '/api/v1/config/detectors/diff', { content: S.det.draft })).diff; } catch (e) { toast(e.message, true); }
+  drawDet();
+}
+async function detSubmit(kind) {
+  const t = S.det, comment = t.comment.trim();
+  if (!comment) { toast('Add a short comment (what and why).', true); return; }
+  t.error = '';
+  try {
+    if (kind === 'save') { const r = await api('PUT', '/api/v1/config/detectors', { content: t.draft, comment }); toast(r.changed ? 'Saved as revision ' + r.rev + '; active now.' : 'No changes.'); S.det.comment = ''; await loadDet(); }
+    else { const r = await api('POST', '/api/v1/proposals', { key: 'detectors', content: t.draft, comment }); toast('Proposal #' + r.id + ' created.'); t.comment = ''; refreshPendingCount(); }
+  } catch (e) { S.det.error = e.message; toast('Rejected: see the message above', true); }
+  drawDet();
+}
+const pageDetectors = async () => { if (!S.det) await loadDet(); else { try { S.det.status = await api('GET', '/api/v1/detectors/status'); } catch (e) { /* keep the old one */ } } drawDet(); };
+
+function detEditor() {
+  const e = S.det.edit, d = e.d, t = S.det;
+  const lab = (text, node, hint) => h('div', { style: 'margin-bottom:6px' }, h('div', { class: 'muted small' }, text), node, hint ? h('div', { class: 'muted small' }, hint) : null);
+  const num = (key, min, max) => h('input', { type: 'number', min, max, style: 'width:110px', value: d[key], oninput: (ev) => { d[key] = ev.target.value === '' ? '' : Number(ev.target.value); } });
+  const selOf = (key, opts) => h('select', { onchange: (ev) => { d[key] = ev.target.value; if (key === 'mode') drawDet(); } },
+    opts.map((o) => (Array.isArray(o) ? o : [o, o])).map(([v, l]) => h('option', { value: v, selected: v === d[key] }, l)));
+  const absent = d.mode === 'absent';
+  const bt = t.bt;
+  const btBox = h('div', { class: 'panel', style: 'background:var(--bg)' },
+    h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Backtest on the stored logs'),
+      h('select', { onchange: (ev) => { t.btHours = Number(ev.target.value); } }, [[24, '24 h'], [72, '3 days'], [168, '7 days'], [336, '14 days']].map(([n, l]) => h('option', { value: n, selected: n === t.btHours }, l))),
+      h('button', { class: 'btn primary', onclick: detBacktest }, 'Run backtest')),
+    h('p', { class: 'muted small' }, 'Replays this rule (unsaved edits included) over consecutive windows of the past and shows when it would have fired. Nothing is sent or changed.'),
+    t.btError ? h('div', { class: 'err' }, t.btError) : null,
+    bt ? h('div', {},
+      bt.no_match ? h('div', { class: 'err' }, absent ? 'The filter matches nothing at all in this period: a silence rule on a source that never logs would fire all the time. Check the filter.' : 'The filter matched no lines in this period. Check the filter.')
+        : h('p', {}, h('strong', {}, bt.firings + ' firing' + (bt.firings === 1 ? '' : 's')), ' in ' + bt.hours + ' h (' + (bt.events_total || 0) + ' qualifying windows of ' + bt.window_min + ' min, ' + fmtN(bt.total) + ' matching lines in total). ',
+          h('span', { class: 'muted' }, 'Each firing is one incident analysis / notification (cooldown ' + d.cooldown_min + ' min applied).')),
+      (bt.samples && bt.samples.length) ? h('div', {}, h('div', { class: 'muted small' }, 'Most frequent matching messages'), bt.samples.map((s) => h('div', { class: 'mono small' }, fmtN(s.hits) + '×  ' + s.msg))) : null,
+      (bt.events && bt.events.length) ? h('table', { style: 'margin-top:8px' }, h('thead', {}, h('tr', {}, ['Window starting', 'Group', 'Lines', ''].map((x) => h('th', {}, x)))),
+        h('tbody', {}, bt.events.slice(-25).map((ev) => h('tr', { class: ev.fires ? '' : 'unused' }, h('td', { class: 'small nowrap' }, fmtTime(ev.time)),
+          h('td', { class: 'mono small' }, Object.entries(ev.group || {}).map(([k, v]) => k + '=' + v).join(' ') || '-'),
+          h('td', { class: 'num' }, absent ? '0' : fmtN(ev.hits)), h('td', { class: 'small' }, ev.fires ? 'fires' : 'cooldown'))))) : null,
+      bt.events_total > 25 ? h('p', { class: 'muted small' }, 'Showing the latest 25 of ' + bt.events_total + '.') : null) : null);
+  return h('div', { class: 'panel', id: 'det-editor' },
+    h('h3', { style: 'margin-top:0' }, e.isNew ? 'New detector' : 'Edit ' + e.orig),
+    h('div', { class: 'grid' },
+      h('div', {},
+        lab('ID (unique; lowercase letters, digits, - _ .)', h('input', { class: 'mono', style: 'width:100%', value: d.id || '', oninput: (ev) => { d.id = ev.target.value; } })),
+        lab('Name', h('input', { style: 'width:100%', value: d.name || '', oninput: (ev) => { d.name = ev.target.value; } })),
+        lab('Log filter (LogsQL, no pipes; the window is added for you)', h('textarea', { class: 'mono', rows: 3, style: 'width:100%', value: d.query || '', oninput: (ev) => { d.query = ev.target.value; } }),
+          'Examples: appname:"plex" _msg:~"(?i)error"   ·   host:"homeassistant"   ·   "Out of memory"'),
+        lab('Note', h('input', { style: 'width:100%', value: d.note || '', oninput: (ev) => { d.note = ev.target.value; } }))),
+      h('div', {},
+        lab('Fires when', selOf('mode', [['count', 'enough matching lines'], ['absent', 'no matching line at all (silence)']])),
+        absent ? null : lab('Threshold (lines in the window)', num('threshold', 1, 1000000)),
+        lab('Window (minutes, 5-1440)', num('window_min', 5, 1440)),
+        absent ? null : lab('Group by (comma separated fields, optional: one firing per group)', h('input', { class: 'mono', style: 'width:100%', value: (d.group_by || []).join(', '), placeholder: 'host, appname',
+          oninput: (ev) => { d.group_by = ev.target.value.split(',').map((x) => x.trim()).filter(Boolean); } })),
+        lab('Cooldown (minutes: no repeat for the same group)', num('cooldown_min', 5, 10080)),
+        lab('Action', selOf('action', DET_ACTIONS)),
+        lab('Severity (for "direct" and "record only")', selOf('severity', ['info', 'low', 'medium', 'high', 'critical'])),
+        h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: d.enabled !== false, onchange: (ev) => { d.enabled = ev.target.checked; } }), ' Enabled'))),
+    btBox,
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: detEditApply }, 'Apply to draft'),
+      h('button', { class: 'btn', onclick: () => { S.det.edit = null; S.det.bt = null; drawDet(); } }, 'Cancel')));
+}
+function drawDet() {
+  const t = S.det, d = t.draft, dirty = !same(d, t.base);
+  const stMap = {};
+  ((t.status && t.status.detectors) || []).forEach((s) => { stMap[s.id] = s; });
+  const rows = d.detectors.map((x) => {
+    const f = detFull(x), s = stMap[f.id];
+    return h('tr', { class: f.enabled === false ? 'unused' : '' },
+      h('td', {}, h('input', { type: 'checkbox', title: 'Enabled', checked: f.enabled !== false, onchange: (ev) => { x.enabled = ev.target.checked; if (x.enabled) delete x.enabled; else x.enabled = false; t.diff = null; drawDet(); } })),
+      h('td', {}, h('strong', {}, f.name || f.id), h('div', { class: 'muted small mono' }, f.id)),
+      h('td', { class: 'small' }, detSummary(f), h('div', { class: 'mono muted' }, f.query)),
+      h('td', { class: 'small' }, f.action === 'triage' ? 'model triage' : f.action === 'direct' ? 'direct (' + f.severity + ')' : 'record (' + f.severity + ')'),
+      h('td', { class: 'small' }, !s ? h('span', { class: 'muted' }, dirty ? 'unsaved' : 'not evaluated yet')
+        : s.error ? h('span', { class: 'badge sev-high', title: s.error }, 'error') : h('span', { class: 'muted' }, s.last_eval ? 'checked ' + fmtTime(s.last_eval) : '-'),
+        s && s.last_fired ? h('div', { class: 'muted' }, 'fired ' + fmtTime(s.last_fired)) : null),
+      h('td', { class: 'nowrap' }, h('button', { class: 'btn small', onclick: () => detEditStart(x, false) }, 'Edit'), ' ',
+        h('button', { class: 'icon', title: 'Remove', onclick: () => { if (confirm('Remove detector ' + (f.name || f.id) + '?')) { d.detectors = d.detectors.filter((y) => y.id !== x.id); t.diff = null; drawDet(); } } }, '×')));
+  });
+  const recent = (t.status && t.status.recent) || [];
+  const bar = h('div', { class: 'savebar' },
+    t.diff !== null ? diffEl(t.diff) : null,
+    t.error ? h('div', { class: 'err' }, t.error) : null,
+    h('div', { class: 'row', style: t.diff !== null ? 'margin-top:8px' : '' },
+      h('input', { class: 'grow', placeholder: 'Comment: what and why', value: t.comment, oninput: (e) => { t.comment = e.target.value; } }),
+      h('button', { class: 'btn', disabled: !dirty, onclick: detDiff }, 'Preview diff'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => { S.det.draft = clone(S.det.base); S.det.edit = null; S.det.diff = null; S.det.bt = null; drawDet(); } }, 'Discard edits'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => detSubmit('propose') }, 'Propose'),
+      isAdmin() ? h('button', { class: 'btn primary', disabled: !dirty, onclick: () => detSubmit('save') }, 'Save') : null),
+    h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Revision #' + t.rev + (dirty ? ' · unsaved changes' : '') + (isAdmin() ? '' : ' · read-only token: use Propose, an admin approves.')));
+  const tplSel = h('select', { onchange: (ev) => {
+    const v = ev.target.value; ev.target.value = '';
+    if (v === 'blank') detEditStart({ id: '', name: '', query: '' }, true); else if (DET_TEMPLATES[v]) detEditStart(DET_TEMPLATES[v], true);
+  } }, [['', '+ Add detector…'], ['blank', 'Blank'], ['burst', 'Template: error burst in a container'], ['silence', 'Template: a source went silent'], ['message', 'Template: a specific message appeared']]
+    .map(([v, l]) => h('option', { value: v }, l)));
+  renderShell([
+    h('h2', {}, 'Detectors'),
+    h('p', { class: 'muted' }, 'Rules over the logs that the service evaluates itself, every ' + ((t.status && t.status.interval_s) || 60) + ' s' + (t.status && t.status.mode === 'off' ? ' (currently OFF: setting DETECTOR_MODE)' : '') +
+      '. A firing becomes a model-triaged incident (noise rules, snoozes and the topology apply), a direct notification, or just a record. Always run the backtest before saving: it shows how often the rule would have fired.'),
+    t.edit ? detEditor() : null,
+    h('div', { class: 'panel' }, h('div', { class: 'row' }, h('h3', { class: 'grow', style: 'margin:0' }, 'Detectors (' + d.detectors.length + ')'), tplSel),
+      d.detectors.length ? h('table', {}, h('thead', {}, h('tr', {}, ['On', 'Detector', 'Condition', 'Action', 'State', ''].map((x) => h('th', {}, x)))), h('tbody', {}, rows))
+        : h('p', { class: 'muted' }, 'No detectors yet. Start from a template: error burst in a container, a source going silent, or a specific message.')),
+    recent.length ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Recent firings'),
+      h('table', {}, h('tbody', {}, recent.map((r) => h('tr', {}, h('td', { class: 'small nowrap' }, fmtTime(r._time)), h('td', {}, r.name || r.detector),
+        h('td', { class: 'mono small' }, r.group && r.group !== '{}' ? r.group : ''), h('td', { class: 'num small' }, r.hits + ' lines'), h('td', { class: 'small' }, r.action)))))) : null,
+    bar,
+  ]);
+}
+
 // ---------------------------------------------------------------- settings
 async function pageSettings() {
   const r = await api('GET', '/api/v1/config/settings');
@@ -793,7 +947,7 @@ async function pageHistory() {
   renderShell([
     h('h2', {}, 'History'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
-      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
     h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
     audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
       h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),

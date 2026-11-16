@@ -36,6 +36,8 @@ SPEC = {
     "NOVELTY_BACKFILL_DAYS": {"type": "int", "min": 0, "max": 14, "desc": "Baseline pre-filled from this many days of stored logs on first start (0 = none)."},
     "NOVELTY_LEARN_HOURS": {"type": "int", "min": 0, "max": 168, "desc": "Learning period without findings when no history could be loaded (hours)."},
     "NOVELTY_SPIKE_FACTOR": {"type": "int", "min": 2, "max": 1000, "desc": "Report a rate spike when a pattern is this many times more frequent than its own average."},
+    "DETECTOR_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "UI-editable detectors (Detectors page): on | off."},
+    "DETECTOR_INTERVAL_S": {"type": "int", "min": 30, "max": 3600, "desc": "How often all enabled detectors are evaluated (s)."},
     "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
 }
 

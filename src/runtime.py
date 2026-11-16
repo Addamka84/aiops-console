@@ -12,11 +12,12 @@ import time
 import uuid
 
 import aiops
+import detectors
 import settings
 import topology
 
 DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults", "known.default.json")
-KEYS = ("known", "settings", "topology")
+KEYS = ("known", "settings", "topology", "detectors")
 
 
 class DocError(Exception):
@@ -39,6 +40,11 @@ def validate_doc(key, content):
         return clean
     if key == "topology":
         errs = topology.validate(content)
+        if errs:
+            raise DocError(errs)
+        return content
+    if key == "detectors":
+        errs = detectors.validate(content)
         if errs:
             raise DocError(errs)
         return content
@@ -149,6 +155,7 @@ class Runtime:
         self._known_rev = -1
         self._settings_rev = -1
         self._topo_rev = -1
+        self._det_rev = -1
         self._raw = {}  # hours -> (monotonic, raw)  (a regex-teszt gyorsitotara)
 
     # ---- inditas
@@ -187,6 +194,11 @@ class Runtime:
                 cur = self.store.current("topology")
                 aiops.TOPOLOGY = topology.Topology(cur["content"] if cur else {})
                 self._topo_rev = tid
+            did = self.store.revision_id("detectors")
+            if did != self._det_rev:
+                cur = self.store.current("detectors")
+                aiops.DETECTORS = [detectors.full(x) for x in (cur["content"].get("detectors", []) if cur else [])]
+                self._det_rev = did
             kid = self.store.revision_id("known")
             if kid != self._known_rev:
                 cur = self.store.current("known")
