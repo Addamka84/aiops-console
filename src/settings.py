@@ -12,7 +12,7 @@ CHOICES_NOTIFY_DIGEST = ["always", "issues", "off"]
 
 # kulcs -> {type: int|str|choice|urls|hhmm, min, max, choices, desc}
 SPEC = {
-    "OLLAMA_URLS": {"type": "urls", "desc": "Ollama endpoints in priority order (first reachable one is used)."},
+    "OLLAMA_URLS": {"type": "urls", "desc": "Model endpoints in priority order (first reachable one is used); http or https, no path."},
     "MODEL": {"type": "str", "desc": "Ollama model name."},
     "NUM_CTX": {"type": "int", "min": 1024, "max": 131072, "desc": "Context window (tokens)."},
     "KEEP_ALIVE": {"type": "keepalive", "desc": "How long Ollama keeps the model in memory after a call (e.g. 2m)."},
@@ -38,6 +38,10 @@ SPEC = {
     "NOVELTY_SPIKE_FACTOR": {"type": "int", "min": 2, "max": 1000, "desc": "Report a rate spike when a pattern is this many times more frequent than its own average."},
     "DETECTOR_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "UI-editable detectors (Detectors page): on | off."},
     "DETECTOR_INTERVAL_S": {"type": "int", "min": 30, "max": 3600, "desc": "How often all enabled detectors are evaluated (s)."},
+    "LLM_API": {"type": "choice", "choices": ["ollama", "openai"], "desc": "Model API of the endpoints: ollama | openai (OpenAI-compatible: vLLM, NIM, llama.cpp server). The API key is the environment variable LLM_API_KEY only."},
+    "FLAP_COUNT": {"type": "int", "min": 0, "max": 100, "desc": "An alert that fired this many times within FLAP_WINDOW_H is flapping: it gets a longer cooldown (never for critical). 0 = off."},
+    "FLAP_WINDOW_H": {"type": "int", "min": 1, "max": 48, "desc": "Window for counting repeated firings of one alert (hours)."},
+    "FLAP_COOLDOWN_MIN": {"type": "int", "min": 30, "max": 1440, "desc": "Cooldown of a flapping alert between incident analyses (minutes)."},
     "CORRELATE_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "Alert correlation through the topology: related alerts become ONE incident with a root-cause hypothesis (on | off)."},
     "CORRELATE_SETTLE_S": {"type": "int", "min": 10, "max": 900, "desc": "How long to wait after the last related alert before the incident analysis starts (s)."},
     "CORRELATE_WINDOW_MIN": {"type": "int", "min": 1, "max": 120, "desc": "Alerts arriving within this many minutes can be related (minutes)."},

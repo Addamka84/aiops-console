@@ -65,7 +65,7 @@ class Base(unittest.TestCase):
 class AlertLabelTests(unittest.TestCase):
     def test_labels_are_parsed_and_limited(self):
         self.assertEqual(aiops.alert_labels(ALERTS, "JournaldCritical"),
-                         [{"alertname": "JournaldCritical", "host": "homesrv3", "SYSLOG_IDENTIFIER": "kernel"}])
+                         [{"alertname": "JournaldCritical", "host": "homesrv3", "SYSLOG_IDENTIFIER": "kernel", "severity": "warning"}])
         many = json.dumps([{"labels": {"alertname": "A", "host": f"h{i}"}} for i in range(9)])
         self.assertEqual(len(aiops.alert_labels(many)), 4)
 

@@ -47,6 +47,11 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   origins are independent) and hands it to the model as a hypothesis, not a fact. A host's own dependencies (e.g. its NFS) do not spread to the containers running on it
   unless declared, and a busy host (high fan-out) is not evidence for grouping unrelated errors. The model's output is checked for grounding: host names that
   do not appear in its input are removed.
+- **Any model server**: the model API is `ollama` (default) or `openai` (OpenAI-compatible: vLLM, NIM, llama.cpp server; `LLM_API`, endpoints with http/https). The reply is requested
+  in the same JSON schema (`response_format: json_schema`, with an automatic fall-back to `json_object` for servers that reject it), the endpoint probe checks `/v1/models`,
+  and the API key is an environment variable (`LLM_API_KEY`) only. Failover and back-off work as before.
+- **Flapping alerts**: an alert that fires `FLAP_COUNT` times within `FLAP_WINDOW_H` hours (default 4 in 6 h) gets a longer cooldown (`FLAP_COOLDOWN_MIN`, default 180 min) instead of
+  a new analysis every 30 minutes; the incident text says it flaps, every skipped firing is recorded (`pipeline:ai kind:alert_flapping`), and a critical alert is never skipped.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)

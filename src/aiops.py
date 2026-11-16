@@ -79,8 +79,15 @@ CFG = {
     "CORRELATE_MODE": os.environ.get("CORRELATE_MODE", "on"),                    # on | off
     "CORRELATE_SETTLE_S": _env_int("CORRELATE_SETTLE_S", 90),                    # mp: ennyit vár az utolso rokon riasztas utan, mielott az incidens indul
     "CORRELATE_WINDOW_MIN": _env_int("CORRELATE_WINDOW_MIN", 10),                # perc: ennyin belul erkezo riasztasok lehetnek rokonok
+    # Modell-API: ollama (alap) | openai (OpenAI-kompatibilis: vLLM, NIM, llama.cpp-szerver...). A kulcs CSAK kornyezeti valtozo.
+    "LLM_API": os.environ.get("LLM_API", "ollama"),
+    "LLM_API_KEY": os.environ.get("LLM_API_KEY", "").strip(),
+    # Flapping-szures a riasztasokra: ugyanaz a riasztas FLAP_COUNT-szor tuzelt FLAP_WINDOW_H ora alatt -> hosszabb szuneteltetes (kritikus nem)
+    "FLAP_COUNT": _env_int("FLAP_COUNT", 4),                                     # 0 = kikapcsolva
+    "FLAP_WINDOW_H": _env_int("FLAP_WINDOW_H", 6),
+    "FLAP_COOLDOWN_MIN": _env_int("FLAP_COOLDOWN_MIN", 180),
 }
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -589,17 +596,25 @@ class OllamaError(Exception):
     pass
 
 
-def _http(url, method, path, body=None, timeout=5):
+def _http(url, method, path, body=None, timeout=5, headers=None):
     u = urllib.parse.urlparse(url)
-    conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+    if u.scheme == "https":
+        conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
     try:
-        headers = {"Content-Type": "application/json"} if body is not None else {}
-        conn.request(method, path, body, headers)
+        h = {"Content-Type": "application/json"} if body is not None else {}
+        h.update(headers or {})
+        conn.request(method, path, body, h)
         resp = conn.getresponse()
         raw = resp.read()
         return resp.status, raw
     finally:
         conn.close()
+
+
+def _auth():
+    return {"Authorization": "Bearer " + CFG["LLM_API_KEY"]} if CFG["LLM_API_KEY"] else {}
 
 
 class EndpointPool:
@@ -611,15 +626,18 @@ class EndpointPool:
 
     def _probe(self, ep):
         """Rovid timeoutu elerhetoseg- es modell-ellenorzes. -> (ok, ok_text)"""
+        openai = CFG["LLM_API"] == "openai"
         try:
-            status, raw = _http(ep["url"], "GET", "/api/tags", timeout=CFG["PROBE_TIMEOUT"])
+            status, raw = _http(ep["url"], "GET", "/v1/models" if openai else "/api/tags", timeout=CFG["PROBE_TIMEOUT"],
+                                headers=_auth() if openai else None)
         except (OSError, http.client.HTTPException) as e:
             return False, f"nem elerheto ({type(e).__name__})"
         if status != 200:
             return False, f"HTTP {status}"
         try:
-            names = [m.get("name", "") for m in json.loads(raw).get("models", [])]
-        except ValueError:
+            doc = json.loads(raw)
+            names = [m.get("id", "") for m in doc.get("data", [])] if openai else [m.get("name", "") for m in doc.get("models", [])]
+        except (ValueError, AttributeError):
             return False, "ervenytelen valasz"
         m = self.model
         if not any(n == m or (":" not in m and n.split(":")[0] == m) for n in names):
@@ -655,6 +673,10 @@ class EndpointPool:
 
 
 def ollama_chat(ep_url, system, user):
+    """A modell hivasa; az API-tipus (CFG LLM_API) szerint Ollama vagy OpenAI-kompatibilis. Mindkettonel Ollama-alaku valasz:
+    {"message": {"content": ...}, "prompt_eval_count": n, "eval_count": n}."""
+    if CFG["LLM_API"] == "openai":
+        return _openai_chat(ep_url, system, user)
     body = json.dumps({
         "model": CFG["MODEL"], "stream": False, "think": False, "format": SCHEMA, "keep_alive": CFG["KEEP_ALIVE"],
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -673,6 +695,38 @@ def ollama_chat(ep_url, system, user):
     if resp.get("done_reason") == "length":
         raise OllamaError("a valasz levagodott (num_predict)")
     return resp
+
+
+_OPENAI_NO_SCHEMA = set()   # azok a vegpontok, amelyek a json_schema response_format-ot elutasitottak (json_object-re esunk vissza)
+
+
+def _openai_chat(ep_url, system, user):
+    base = {"model": CFG["MODEL"], "temperature": 0, "seed": 1, "max_tokens": 1500,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+    schema_fmt = {"type": "json_schema", "json_schema": {"name": "aiops_output", "schema": SCHEMA, "strict": True}}
+    attempts = [{"type": "json_object"}] if ep_url in _OPENAI_NO_SCHEMA else [schema_fmt, {"type": "json_object"}]
+    for fmt in attempts:
+        body = json.dumps(dict(base, response_format=fmt)).encode("utf-8")
+        try:
+            status, raw = _http(ep_url, "POST", "/v1/chat/completions", body, timeout=CFG["GEN_TIMEOUT"], headers=_auth())
+        except (OSError, http.client.HTTPException) as e:
+            raise OllamaError(f"hivas sikertelen ({type(e).__name__}: {e})")
+        if status in (400, 422) and fmt is schema_fmt:
+            _OPENAI_NO_SCHEMA.add(ep_url)   # a szerver nem tamogatja a sema szerinti kimenetet: json_object-tel ujra
+            continue
+        if status != 200:
+            raise OllamaError(f"HTTP {status}: {raw[:200]!r}")
+        try:
+            resp = json.loads(raw)
+            choice = resp["choices"][0]
+            content = choice["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise OllamaError("ervenytelen valasz (choices[0].message.content hianyzik)")
+        if choice.get("finish_reason") == "length":
+            raise OllamaError("a valasz levagodott (max_tokens)")
+        usage = resp.get("usage") or {}
+        return {"message": {"content": content}, "prompt_eval_count": usage.get("prompt_tokens"), "eval_count": usage.get("completion_tokens")}
+    raise OllamaError("a vegpont egyik response_format-ot sem fogadta el")
 
 
 def parse_output(content):
@@ -730,12 +784,36 @@ def alert_labels(alerts_json, alertname="", limit=4):
     for a in arr if isinstance(arr, list) else []:
         lab = a.get("labels") if isinstance(a, dict) else None
         if isinstance(lab, dict):
-            out.append({k: str(lab[k])[:80] for k in ("alertname", "host", "SYSLOG_IDENTIFIER", "appname") if k in lab})
+            out.append({k: str(lab[k])[:80] for k in ("alertname", "host", "SYSLOG_IDENTIFIER", "appname", "severity") if k in lab})
         if len(out) >= limit:
             break
     if not out and alertname:
         out.append({"alertname": alertname})
     return out
+
+
+def note_firing(state, key):
+    """Egy riasztas tuzelesenek rogzitese (FLAP_WINDOW_H oraig orizve). -> a tuzelesek szama az ablakban (ezzel egyutt)."""
+    hist = state.setdefault("alert_history", {})
+    horizon = time.time() - max(1, CFG["FLAP_WINDOW_H"]) * 3600
+    lst = [t for t in hist.get(key, []) if t >= horizon]
+    lst.append(time.time())
+    hist[key] = lst[-100:]
+    for k in [k for k, v in hist.items() if not v or v[-1] < horizon]:   # regi kulcsok torlese
+        del hist[k]
+    return len(hist[key])
+
+
+def flap_decision(firings, labels, since_last_incident_s):
+    """Flapping-e a riasztas (FLAP_COUNT tuzeles FLAP_WINDOW_H oran belul)? -> (kihagyjuk-e, megjegyzes az incidens szovegehez).
+    Kihagyas csak akkor, ha az utolso incidens ota nem telt el FLAP_COOLDOWN_MIN; a kritikus riasztast SOHA nem hagyjuk ki."""
+    if not CFG["FLAP_COUNT"] or firings < CFG["FLAP_COUNT"]:
+        return False, ""
+    note = f" (flapping: this alert fired {firings} times in the last {CFG['FLAP_WINDOW_H']} h)"
+    critical = any(str(lab.get("severity", "")).lower() == "critical" for lab in labels)
+    if not critical and since_last_incident_s < CFG["FLAP_COOLDOWN_MIN"] * 60:
+        return True, note
+    return False, note
 
 
 def alert_evidence(job, known, t_from, t_to):
@@ -1022,6 +1100,7 @@ def load_state():
     s.setdefault("recent_alert_keys", {})
     s.setdefault("incident_times", [])
     s.setdefault("alert_items", [])
+    s.setdefault("alert_history", {})
     return s
 
 
@@ -1089,6 +1168,7 @@ def poll_incidents(state, now):
             last = t
         state["last_alert_ts"] = iso_us(last)
         key = f"{r.get('alertname', '')}|{r.get('alert_root', '')}"
+        firings = note_firing(state, key)                     # minden tuzeles szamit (a 30 perces szuneteltetes alatt is): ebbol latszik a flapping
         last_seen = state["recent_alert_keys"].get(key, 0)   # (nem 'last': az az utolso esemeny ideje, kulon valtozo kell)
         if time.time() - last_seen < 1800:
             continue  # ugyanaz a riasztas 30 percen belul: nem triazsoljuk ujra
@@ -1096,8 +1176,19 @@ def poll_incidents(state, now):
         if len(state["incident_times"]) >= CFG["MAX_INCIDENTS_PER_HOUR"]:
             log("incidens-korlat elerve (ora), a tobbi kimarad", key="incident_cap")
             continue
+        labels = alert_labels(r.get("alerts", ""), r.get("alertname", ""))
+        suppress, note = flap_decision(firings, labels, time.time() - last_seen)
+        if suppress:
+            STATUS["flapping_suppressed"] = STATUS.get("flapping_suppressed", 0) + 1
+            log(f"flapping riasztas kihagyva ({firings} tuzeles / {CFG['FLAP_WINDOW_H']} ora): {key}")
+            try:
+                vl_insert([{"_time": iso(utcnow()), "pipeline": "ai", "kind": "alert_flapping", "alert_key": key, "firings": str(firings),
+                            "_msg": f"[aiops] flapping alert skipped: {key} fired {firings} times in {CFG['FLAP_WINDOW_H']} h"}])
+            except OSError as e:
+                log(f"VictoriaLogs iras sikertelen: {e}", key="vl_insert")
+            continue
         state["recent_alert_keys"][key] = time.time()
-        queue_alert(state, now, key, r.get("_msg", ""), alert_labels(r.get("alerts", ""), r.get("alertname", "")), None)
+        queue_alert(state, now, key, r.get("_msg", "") + note, labels, None)
         log(f"riasztas elemkent sorba allitva: {key}")
 
 
