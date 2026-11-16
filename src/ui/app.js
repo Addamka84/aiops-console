@@ -157,6 +157,10 @@ function resultCard(title, r) {
   if (!r) return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, title), h('p', { class: 'muted' }, 'Nothing yet.'));
   return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, title),
     h('p', { class: 'muted small' }, [r.model, r.endpoint, r.window || r.alert].filter(Boolean).join(' · ')),
+    r.correlation ? h('p', { class: 'small' }, h('span', { class: 'badge sev-low' }, 'correlated'), ' ' + (r.correlated_alerts || 1) + ' alert(s) grouped via the topology',
+      r.correlation.root ? ' · root hypothesis: ' + r.correlation.root + ' (confidence ' + r.correlation.confidence + ')' : '',
+      r.correlation.suspected_dependency ? ' · suspected shared dependency: ' + r.correlation.suspected_dependency.ci : '',
+      r.ungrounded_hosts ? ' · ' + r.ungrounded_hosts + ' invented name(s) removed from the model output' : '') : null,
     h('p', {}, r.summary || ''), issueList(r.issues));
 }
 // ---------------------------------------------------------------- statistics (review of the last check, log volume chart)

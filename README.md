@@ -41,6 +41,12 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   input, noise rules/snoozes/topology apply, and a rule whose lines are all noise is skipped), *notify directly* (HA webhook, no model) or *record only*.
   The service evaluates them itself on its own thread. **Backtest before you save**: the UI replays the rule over the past 1-14 days and shows when and how
   often it would have fired, which messages it matches and what the cooldown does, so a noisy rule never reaches production.
+- **Related alerts become ONE incident**: alerts and detector firings that are connected in the topology (same device, one depends on the other, or a shared
+  non-hub dependency) and arrive within minutes are grouped after a short settle window (`CORRELATE_SETTLE_S`, default 90 s) and analysed together. The code computes
+  a **root-cause hypothesis** (the topmost affected device that explains the most others, with a confidence value, plus a suspected shared dependency when the
+  origins are independent) and hands it to the model as a hypothesis, not a fact. A host's own dependencies (e.g. its NFS) do not spread to the containers running on it
+  unless declared, and a busy host (high fan-out) is not evidence for grouping unrelated errors. The model's output is checked for grounding: host names that
+  do not appear in its input are removed.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)

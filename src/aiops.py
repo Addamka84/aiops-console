@@ -75,8 +75,12 @@ CFG = {
     # A kezelofeluletrol szerkesztheto detektorok (detectors.py)
     "DETECTOR_MODE": os.environ.get("DETECTOR_MODE", "on"),                      # on | off
     "DETECTOR_INTERVAL_S": _env_int("DETECTOR_INTERVAL_S", 60),                  # mp: ennyi idonkent ertekeli ki az osszes detektort
+    # Riasztas-korrelacio a topologian at (correlation.py): a rokon riasztasok egy incidensbe vonasa
+    "CORRELATE_MODE": os.environ.get("CORRELATE_MODE", "on"),                    # on | off
+    "CORRELATE_SETTLE_S": _env_int("CORRELATE_SETTLE_S", 90),                    # mp: ennyit vár az utolso rokon riasztas utan, mielott az incidens indul
+    "CORRELATE_WINDOW_MIN": _env_int("CORRELATE_WINDOW_MIN", 10),                # perc: ennyin belul erkezo riasztasok lehetnek rokonok
 }
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -104,6 +108,7 @@ A "Topology" section lists the devices involved, with IPs, roles and dependencie
 
 INCIDENT_PROMPT_EXTRA = """
 This window was selected because an alert fired. Explain the alert using the correlated log lines, name the most likely root cause and the affected hosts. The alert itself must appear as an issue.
+If related alerts are listed, they were grouped because they are connected in the topology: explain them as ONE incident, not one issue per alert. A "Root-cause HYPOTHESIS" section is computed by code from the dependencies: treat it as the leading hypothesis and say so if the logs contradict it; never present it as certain. In "hosts" use ONLY names that appear in the input.
 Severity must follow the ACTUAL log lines, never the alert's name or words in it (e.g. "critical", "kritikus"). If the lines behind the alert are not shown in the input, say the cause is unknown and use severity low; do not guess a kernel panic or hardware failure.
 Do not claim a causal link between different hosts or services unless the logs show it (same time AND a shared dependency such as NFS or DNS). Report unrelated problems as separate low-severity issues, or leave them out."""
 
@@ -734,7 +739,25 @@ def alert_labels(alerts_json, alertname="", limit=4):
 
 
 def alert_evidence(job, known, t_from, t_to):
-    """A riasztas mogotti tenyleges naplosorok (jelenleg: JournaldCritical -> a host/azonosito >=err sorai). A zajszabaly / snooze /
+    """Egy incidens-munka bizonyitéka: a csomag MINDEN elemenek bizonyitekabol egyben. Az incidens csak akkor marad ki, ha MINDEN elemnek
+    van bizonyitéka es mind zaj / snooze / ismert ugy; egyebkent a megtartott sorok (elemenkent) kerulnek a bemenetbe.
+    -> {"kept", "suppressed", "total"} vagy None."""
+    items = job.get("items") or [job]
+    results = [item_evidence(it, known, t_from, t_to) for it in items]
+    if all(r is None for r in results):
+        return None
+    kept = [x for r in results if r for x in r["kept"]][:14]
+    suppressed = sum(r["suppressed"] for r in results if r)
+    total = sum(r["total"] for r in results if r)
+    if all(r is not None and r["total"] > 0 and not r["kept"] for r in results):
+        return {"kept": [], "suppressed": suppressed, "total": total}   # minden elem zaj: az incidens kimarad
+    if not kept:
+        return None            # egyes elemeknek nincs (elerheto) bizonyitéka: nem allapithato meg, hogy zaj
+    return {"kept": kept, "suppressed": suppressed, "total": total}
+
+
+def item_evidence(job, known, t_from, t_to):
+    """Egy riasztas-elem mogotti tenyleges naplosorok (JournaldCritical -> a host/azonosito >=err sorai; detektor -> a szuro sorai). A zajszabaly / snooze /
     ismert ugy ezekre is hat. -> {"kept": [sorok], "suppressed": N, "total": N} vagy None (nem tamogatott riasztas, vagy a lekerdezes
     nem sikerult: ilyenkor a regi viselkedes marad, az incidens nem akad el)."""
     det = job.get("detector")
@@ -809,6 +832,13 @@ def run_job(job, known, pool, dry_run=False):
     if job["kind"] == "incident":
         system += INCIDENT_PROMPT_EXTRA
         extra = ["== ALERT that triggered this analysis:", cut(job.get("alert_text", ""), 300)]
+        items = job.get("items") or []
+        if len(items) > 1:      # korrelalt csomag: a tobbi riasztas es a topologiabol szamolt gyokerok-hipotezis
+            extra.append(f"== Related alerts grouped into this incident ({len(items) - 1} more):")
+            extra.extend("- " + cut(it["text"], 200) for it in items[1:9])
+        if job.get("correlation") and TOPOLOGY:
+            import correlation
+            extra.extend(correlation.describe(TOPOLOGY, job["correlation"]))
         if evidence is not None and evidence["kept"]:
             extra.append("== Log lines behind the alert (host | source | count | message):")
             extra.extend(evidence["kept"])
@@ -838,15 +868,19 @@ def run_job(job, known, pool, dry_run=False):
         return "retry"
     secs = round(time.monotonic() - t0, 1)
     issues, dropped = known.post_filter(out["issues"])
+    issues, ungrounded = ground_issues(issues, user)
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
-        "input_chars": len(user), "stats": stats,
+        "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded,
     }
     if job["kind"] == "incident":
         result["alert"] = job.get("alert_text", "")
         result["alert_key"] = job.get("key", "")
+        if job.get("correlation"):
+            result["correlation"] = job["correlation"]
+            result["correlated_alerts"] = len(job.get("items") or [])
     events = to_events(result)
     if dry_run:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -861,6 +895,21 @@ def run_job(job, known, pool, dry_run=False):
     STATUS["last_" + job["kind"]] = result
     log(f"{job['kind']} kesz ({secs}s, {len(issues)} ugy, {len(dropped)} ismert eldobva, vegpont {ep['url']})")
     return "done"
+
+
+def ground_issues(issues, user):
+    """A modell kimenetenek megalapozas-ellenorzese: egy ugy 'hosts' listajaban csak olyan nev maradhat, amely a bemenetben szerepel
+    (a kitalalt gep / eszkoz kikerul). -> (ugyek, az eltavolitott nevek szama). Az ugy maga megmarad: a bizonyitek tovabbra is latszik."""
+    low = user.lower()
+    removed = 0
+    out = []
+    for i in issues:
+        hosts = [h for h in i.get("hosts", []) if str(h).strip() and str(h).lower() in low]
+        removed += len(i.get("hosts", [])) - len(hosts)
+        out.append(dict(i, hosts=hosts))
+    if removed:
+        log(f"megalapozas: {removed} a bemenetben nem szereplo nev eltavolitva a modell kimenetebol", key="grounding")
+    return out, removed
 
 
 def max_severity(issues):
@@ -937,8 +986,14 @@ def to_events(result):
         "prompt_tokens": str(result["prompt_tokens"]), "out_tokens": str(result["out_tokens"]),
         "stats": json.dumps(result.get("stats") or {}, ensure_ascii=False, separators=(",", ":")),
     }
+    head["ungrounded_hosts"] = str(result.get("ungrounded_hosts", 0))
     if result["kind"] == "incident":
         head["alert"] = result.get("alert", "")
+        if result.get("correlation"):
+            c = result["correlation"]
+            head["correlated_alerts"] = str(result.get("correlated_alerts", 1))
+            head["root_hypothesis"] = str(c.get("root") or "")
+            head["root_confidence"] = str(c.get("confidence", 0))
     events = [head]
     for i in result["issues"]:
         events.append({
@@ -966,6 +1021,7 @@ def load_state():
     s.setdefault("last_alert_ts", "")
     s.setdefault("recent_alert_keys", {})
     s.setdefault("incident_times", [])
+    s.setdefault("alert_items", [])
     return s
 
 
@@ -1041,13 +1097,65 @@ def poll_incidents(state, now):
             log("incidens-korlat elerve (ora), a tobbi kimarad", key="incident_cap")
             continue
         state["recent_alert_keys"][key] = time.time()
-        state["incident_times"].append(time.time())
-        state["pending"].append({
-            "kind": "incident", "created": time.time(), "attempts": 0, "key": key, "alert_text": r.get("_msg", ""),
-            "alert_labels": alert_labels(r.get("alerts", ""), r.get("alertname", "")),
-            "window_from": iso(now - dt.timedelta(minutes=CFG["INCIDENT_LOOKBACK_MIN"])), "window_to": iso(now),
-        })
-        log(f"incidens utemezve: {key}")
+        queue_alert(state, now, key, r.get("_msg", ""), alert_labels(r.get("alerts", ""), r.get("alertname", "")), None)
+        log(f"riasztas elemkent sorba allitva: {key}")
+
+
+def queue_alert(state, now, key, text, labels, detector):
+    """Egy tuzelo riasztas / detektor-talalat: korrelacio mellett elemkent var a leulepedesi ablakra, egyebkent azonnal incidens-munka."""
+    import correlation
+    cis = []
+    if TOPOLOGY:
+        vals = [str(v) for lab in labels for k, v in lab.items() if k != "alertname"]
+        if detector:
+            vals += [str(v) for v in (detector.get("group") or {}).values()]
+        cis = correlation.resolve_cis(TOPOLOGY, [text] + vals)
+    item = {"key": key, "text": text, "ts": time.time(), "cis": cis, "alert_labels": labels, "detector": detector}
+    if CFG["CORRELATE_MODE"] != "on" or not TOPOLOGY:
+        _make_incident_job(state, now, [item])
+        return
+    state.setdefault("alert_items", []).append(item)
+
+
+def _make_incident_job(state, now, items):
+    """Egy (vagy tobb, korrelalt) riasztas -> EGY incidens-munka. A bizonyitek elemenkent kerul be (alert_evidence)."""
+    import correlation
+    first = items[0]
+    corr = correlation.analyze(TOPOLOGY, items) if TOPOLOGY and (len(items) > 1 or first["cis"]) else None
+    text = first["text"] if len(items) == 1 else first["text"] + f"\n(+{len(items) - 1} related alert(s) grouped into this incident)"
+    windows = [it["detector"]["window_min"] for it in items if it.get("detector")]
+    lookback = max([CFG["INCIDENT_LOOKBACK_MIN"]] + windows)
+    labels = [lab for it in items for lab in it["alert_labels"]][:4]
+    job = {"kind": "incident", "created": time.time(), "attempts": 0, "key": first["key"], "alert_text": text, "alert_labels": labels,
+           "items": [{"text": it["text"], "alert_labels": it["alert_labels"], "detector": it["detector"]} for it in items][:12],
+           "correlation": corr,
+           "window_from": iso(now - dt.timedelta(minutes=lookback)), "window_to": iso(now)}
+    if len(items) == 1 and first["detector"]:
+        job["detector"] = first["detector"]       # visszafele kompatibilis alak
+    state["incident_times"] = [t for t in state.get("incident_times", []) if time.time() - t < 3600]
+    state["incident_times"].append(time.time())
+    state["pending"].append(job)
+    log(f"incidens utemezve: {first['key']} ({len(items)} riasztas)")
+
+
+def flush_alerts(state, now):
+    """A leulepedesi ablakot kivaro riasztas-elemek csomagolasa incidensekke (a topologian at rokon elemek egyutt)."""
+    items = state.get("alert_items") or []
+    if not items:
+        return
+    import correlation
+    settle = CFG["CORRELATE_SETTLE_S"]
+    groups = correlation.cluster(TOPOLOGY, items, window_s=CFG["CORRELATE_WINDOW_MIN"] * 60)
+    done = set()
+    for g in groups:
+        newest = max(items[i]["ts"] for i in g)
+        oldest = min(items[i]["ts"] for i in g)
+        t = time.time()
+        if t - newest >= settle or t - oldest >= 4 * settle:      # nem vart a vegtelensegig, ha folyamatosan jon ujabb
+            _make_incident_job(state, now, [items[i] for i in sorted(g, key=lambda i: items[i]["ts"])])
+            done.update(g)
+    if done:
+        state["alert_items"] = [it for i, it in enumerate(items) if i not in done]
 
 
 def poll_detectors(state, now):
@@ -1074,14 +1182,8 @@ def poll_detectors(state, now):
             if len(state["incident_times"]) >= CFG["MAX_INCIDENTS_PER_HOUR"]:
                 log("incidens-korlat elerve (ora), a detektor-talalat kimarad", key="incident_cap")
                 continue
-            state["incident_times"].append(time.time())
-            lookback = max(CFG["INCIDENT_LOOKBACK_MIN"], d["window_min"])
-            state["pending"].append({
-                "kind": "incident", "created": time.time(), "attempts": 0, "key": key, "alert_text": text, "alert_labels": [],
-                "detector": {"id": d["id"], "name": d["name"], "query": d["query"], "mode": d["mode"], "group": group,
-                             "window_min": d["window_min"]},
-                "window_from": iso(now - dt.timedelta(minutes=lookback)), "window_to": iso(now),
-            })
+            queue_alert(state, now, key, text, [], {"id": d["id"], "name": d["name"], "query": d["query"], "mode": d["mode"], "group": group,
+                                                    "window_min": d["window_min"]})
         elif action == "direct":
             send_notification({"kind": "detector", "severity": d["severity"], "title": f"AIOps detector: {d['name']}",
                                "message": text[:700], "issue_count": 1, "all_clear": False, "model": ""})
@@ -1181,6 +1283,7 @@ def service_loop(get_known, store=None):
                 last_poll = time.monotonic()
                 poll_incidents(state, now)
             poll_detectors(state, now)
+            flush_alerts(state, now)
             expire_jobs(state)
             if state["pending"]:
                 job = state["pending"][0]

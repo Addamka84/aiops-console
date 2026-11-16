@@ -38,6 +38,9 @@ SPEC = {
     "NOVELTY_SPIKE_FACTOR": {"type": "int", "min": 2, "max": 1000, "desc": "Report a rate spike when a pattern is this many times more frequent than its own average."},
     "DETECTOR_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "UI-editable detectors (Detectors page): on | off."},
     "DETECTOR_INTERVAL_S": {"type": "int", "min": 30, "max": 3600, "desc": "How often all enabled detectors are evaluated (s)."},
+    "CORRELATE_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "Alert correlation through the topology: related alerts become ONE incident with a root-cause hypothesis (on | off)."},
+    "CORRELATE_SETTLE_S": {"type": "int", "min": 10, "max": 900, "desc": "How long to wait after the last related alert before the incident analysis starts (s)."},
+    "CORRELATE_WINDOW_MIN": {"type": "int", "min": 1, "max": 120, "desc": "Alerts arriving within this many minutes can be related (minutes)."},
     "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
 }
 
