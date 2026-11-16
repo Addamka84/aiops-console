@@ -31,6 +31,11 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   and puts them in the model input; if all of them are covered by noise rules, snoozes or known issues, the incident is skipped (no model call, no
   notification; a `pipeline:ai kind:incident_skipped` event records why). The prompt forbids taking the severity from the alert's name and inventing
   causal links between unrelated hosts.
+- **It knows the lab (topology)**: a small, editable document of devices, IPs, roles and dependencies (host/container/network/service/device; "runs on", "depends on"
+  with a type such as network, storage, dns, mqtt, power). The model does not query it (a small model is poor at tool calls): the code picks the devices that
+  appear in the alert and in the kept log lines, adds what they depend on (two levels) and what depends on them, and puts that as a short section into the
+  input; the prompt allows a causal claim between devices only along a dependency path shown there. The UI shows what the model would get for any text,
+  and compares the topology with the hosts and containers seen in the logs (new ones to add, silent ones to review) so it does not rot.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
@@ -47,6 +52,7 @@ Open `http://<host>:8095/` for the **web UI** and sign in with one of the tokens
 |---|---|
 | Status | LLM endpoints (up/down, backoff), queue, next digest; **new patterns & rate spikes**; **what the last check reviewed**, log-volume chart, recent checks; last digest / incident with issues; admin: run a digest now, send a test notification |
 | Noise & known issues | Edit lab context, noise regexes and known issues; **snooze** a line from the dry-run list (immediately for admin, as a proposal for a read token). **Run test** replays your unsaved edits against the live logs: per-rule matches, what is still reaching the model, and a one-click "+ noise" that drafts a rule from a line. Preview the diff, then **Save** (admin) or **Propose** |
+| Topology | Devices table with an editor (kind, IP, role, log names, runs on, criticality, dependencies), **"what the model would get"** for any pasted alert or line, **coverage against the logs** with one-click "+ add", then Preview diff / Save / Propose |
 | Settings | All editable settings with their defaults; only differences are stored |
 | Proposals | Review proposals (with diff); admin approves/rejects; stale ones need "Approve anyway" |
 | History | Revisions with a diff against the current state and one-click rollback; audit log (admin) |
@@ -69,6 +75,9 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /stats/runs?kind=digest&limit=14` (read) | recent checks with their "what was reviewed" statistics (from the `pipeline:ai` events in VictoriaLogs) |
 | `GET /novelty?status=open&limit=100` (read) | new-pattern / rate-spike findings plus the detector state (baseline size, last scan, errors); `status` `open`/`dismissed`/`all` |
 | `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (admin) | mark findings as reviewed |
+| `GET/PUT /config/topology` (read/admin), `POST /proposals` with `"key":"topology"` and `content` | the topology document `{"assets": [...]}` (validated: unique ids/names/aliases/IPs, references must exist); versioned like the other documents |
+| `POST /test/topology` (read) | `{"text": "...", "content": {...}?}`: the devices found in the text and the topology section the model would get (uses unsaved `content` if given) |
+| `GET /topology/coverage?hours=168` (read) | hosts/containers seen in the logs but not in the topology (`unknown`) and topology hosts/containers not seen in the logs (`silent`); 2 min cache |
 | `GET /snoozes` (read) | temporary mutes with `active` and `remaining_s` |
 | `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |
 | `DELETE /snoozes/{id}` (admin) | un-mute / remove an expired entry |

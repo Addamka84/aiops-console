@@ -78,7 +78,7 @@ function diffEl(text) {
 const isAdmin = () => S.role === 'admin';
 
 // ---------------------------------------------------------------- shell
-const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
+const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
 async function loadVersion() {
@@ -116,7 +116,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -322,7 +322,7 @@ async function pageStatus() {
           h('dt', {}, 'Next digest'), h('dd', {}, fmtTime(s.next_digest_utc)),
           h('dt', {}, 'Notifications'), h('dd', {}, s.notify_configured ? 'configured' : 'not configured (HA_WEBHOOK_URL)'),
           h('dt', {}, 'Last notification'), h('dd', {}, s.last_notify ? (s.last_notify.ok ? 'ok' : 'FAILED') + ' · ' + s.last_notify.kind + ' · ' + fmtTime(s.last_notify.at) : '-'),
-          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', settings #' + s.config.settings_rev))),
+          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', settings #' + s.config.settings_rev))),
       h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Actions'),
         isAdmin() ? h('div', { class: 'row' },
           h('span', { class: 'muted small' }, 'Digest over the last'), hoursInp, h('span', { class: 'muted small' }, 'h'),
@@ -513,6 +513,178 @@ function draw() {
   ]);
 }
 
+// ---------------------------------------------------------------- topology (devices, IPs, roles, dependencies)
+const TOPO_KINDS = ['host', 'container', 'network', 'service', 'device'];
+const TOPO_DEPS = ['network', 'storage', 'dns', 'mqtt', 'power', 'runtime', 'data', 'auth', 'other'];
+S.topo = null;
+const assetName = (a) => a.name || a.id;
+const topoNorm = (d) => ({ assets: (d && d.assets) || [] });
+const topoSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^[-_.]+/, '').slice(0, 48);
+async function loadTopo() {
+  const r = await api('GET', '/api/v1/config/topology');
+  const keep = S.topo || {};
+  S.topo = { rev: r.id, base: topoNorm(r.content), draft: clone(topoNorm(r.content)), edit: null, filter: keep.filter || '', test: null, testText: keep.testText || '',
+    testError: '', cov: keep.cov || null, covError: '', covHours: keep.covHours || 168, diff: null, comment: '', error: '' };
+}
+function topoFindByName(name) {
+  const n = String(name).toLowerCase();
+  return S.topo.draft.assets.find((a) => a.id === n || (a.name || '').toLowerCase() === n || (a.aliases || []).some((x) => x.toLowerCase() === n));
+}
+function topoEditStart(a, isNew) {
+  S.topo.edit = { isNew, orig: a.id, a: Object.assign({ id: '', kind: 'host', aliases: [], depends_on: [] }, clone(a)) };
+  drawTopo();
+}
+function topoEditApply() {
+  const e = S.topo.edit, a = e.a, list = S.topo.draft.assets;
+  for (const k of ['name', 'ip', 'role', 'note', 'runs_on']) { if (!a[k]) delete a[k]; }
+  if (!a.aliases || !a.aliases.length) delete a.aliases;
+  if (!a.depends_on || !a.depends_on.length) delete a.depends_on;
+  if (!a.criticality || a.criticality === 'normal') delete a.criticality;
+  if (!a.id) { toast('The id is required.', true); return; }
+  if (e.isNew) list.push(a);
+  else {
+    const i = list.findIndex((x) => x.id === e.orig);
+    list[i] = a;
+    if (e.orig !== a.id) {  // renamed: keep the references valid
+      for (const x of list) { if (x.runs_on === e.orig) x.runs_on = a.id; (x.depends_on || []).forEach((d) => { if (d.id === e.orig) d.id = a.id; }); }
+    }
+  }
+  S.topo.edit = null; S.topo.test = null; S.topo.diff = null;
+  drawTopo();
+}
+function topoRemove(id) {
+  const list = S.topo.draft.assets;
+  S.topo.draft.assets = list.filter((x) => x.id !== id);
+  for (const x of S.topo.draft.assets) { if (x.runs_on === id) delete x.runs_on; if (x.depends_on) { x.depends_on = x.depends_on.filter((d) => d.id !== id); if (!x.depends_on.length) delete x.depends_on; } }
+  S.topo.test = null; S.topo.diff = null;
+  drawTopo();
+}
+async function topoCoverage() {
+  S.topo.covError = '';
+  try { S.topo.cov = await api('GET', '/api/v1/topology/coverage?hours=' + S.topo.covHours); } catch (e) { S.topo.cov = null; S.topo.covError = e.message; }
+  drawTopo();
+}
+async function topoTry() {
+  S.topo.testError = '';
+  try { S.topo.test = await api('POST', '/api/v1/test/topology', { text: S.topo.testText, content: S.topo.draft }); } catch (e) { S.topo.test = null; S.topo.testError = e.message; }
+  drawTopo();
+}
+async function topoDiff() {
+  try { S.topo.diff = (await api('POST', '/api/v1/config/topology/diff', { content: S.topo.draft })).diff; } catch (e) { toast(e.message, true); }
+  drawTopo();
+}
+async function topoSubmit(kind) {
+  const t = S.topo, comment = t.comment.trim();
+  if (!comment) { toast('Add a short comment (what and why).', true); return; }
+  t.error = '';
+  try {
+    if (kind === 'save') { const r = await api('PUT', '/api/v1/config/topology', { content: t.draft, comment }); toast(r.changed ? 'Saved as revision ' + r.rev + '; active now.' : 'No changes.'); S.topo.comment = ''; await loadTopo(); }
+    else { const r = await api('POST', '/api/v1/proposals', { key: 'topology', content: t.draft, comment }); toast('Proposal #' + r.id + ' created.'); t.comment = ''; refreshPendingCount(); }
+  } catch (e) { S.topo.error = e.message; toast('Rejected: see the message above', true); }
+  drawTopo();
+}
+const pageTopology = async () => { if (!S.topo) await loadTopo(); drawTopo(); };
+
+function topoEditor() {
+  const e = S.topo.edit, a = e.a, others = S.topo.draft.assets.filter((x) => x.id !== e.orig);
+  const field = (label, key, opts = {}) => h('div', { style: 'margin-bottom:6px' }, h('div', { class: 'muted small' }, label),
+    h('input', { class: opts.mono ? 'mono' : '', style: 'width:100%', value: a[key] || '', placeholder: opts.ph || '', oninput: (ev) => { a[key] = ev.target.value; } }));
+  const sel = (label, key, options, blank, dflt = '') => h('div', { style: 'margin-bottom:6px' }, h('div', { class: 'muted small' }, label),
+    h('select', { onchange: (ev) => { a[key] = ev.target.value; } },
+      (blank ? [['', blank]] : []).concat(options.map((o) => (Array.isArray(o) ? o : [o, o]))).map(([v, l]) => h('option', { value: v, selected: v === (a[key] || dflt) }, l))));
+  const deps = (a.depends_on || []).map((d, i) => h('div', { class: 'row' },
+    h('select', { onchange: (ev) => { d.id = ev.target.value; } }, [['', '(choose)']].concat(others.map((x) => [x.id, (x.name || x.id) + ' (' + x.kind + ')'])).map(([v, l]) => h('option', { value: v, selected: v === d.id }, l))),
+    h('select', { onchange: (ev) => { d.type = ev.target.value; } }, TOPO_DEPS.map((t) => h('option', { value: t, selected: t === (d.type || 'other') }, t))),
+    h('button', { class: 'icon', title: 'Remove', onclick: () => { a.depends_on.splice(i, 1); drawTopo(); } }, '×')));
+  return h('div', { class: 'panel', id: 'topo-editor' },
+    h('h3', { style: 'margin-top:0' }, e.isNew ? 'New device' : 'Edit ' + e.orig),
+    h('div', { class: 'grid' },
+      h('div', {}, field('ID (unique; lowercase letters, digits, - _ .)', 'id', { mono: true }), field('Display name (optional)', 'name'),
+        sel('Kind', 'kind', TOPO_KINDS), field('IP address', 'ip', { mono: true, ph: '192.168.31.x' })),
+      h('div', {}, field('Role / function', 'role'),
+        h('div', { style: 'margin-bottom:6px' }, h('div', { class: 'muted small' }, 'Names in the logs (comma separated: host, container name, syslog identifier)'),
+          h('input', { class: 'mono', style: 'width:100%', value: (a.aliases || []).join(', '), oninput: (ev) => { a.aliases = ev.target.value.split(',').map((x) => x.trim()).filter(Boolean); } })),
+        sel('Runs on (containers: the host)', 'runs_on', others.map((x) => [x.id, (x.name || x.id) + ' (' + x.kind + ')']), '(none)'),
+        sel('Criticality', 'criticality', ['low', 'normal', 'high'], '', 'normal'), field('Note', 'note'))),
+    h('div', { class: 'muted small' }, 'Depends on'), deps,
+    h('div', { style: 'margin:6px 0' }, h('button', { class: 'btn', onclick: () => { a.depends_on = (a.depends_on || []).concat([{ id: '', type: 'network' }]); drawTopo(); } }, '+ dependency')),
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: topoEditApply }, 'Apply to draft'),
+      h('button', { class: 'btn', onclick: () => { S.topo.edit = null; drawTopo(); } }, 'Cancel')));
+}
+function drawTopo() {
+  const t = S.topo, d = t.draft;
+  const dirty = !same(d, t.base);
+  const q = t.filter.trim().toLowerCase();
+  const order = { host: 0, network: 1, service: 2, container: 3, device: 4 };
+  const matches = (a) => !q || [a.id, a.name, a.ip, a.role, ...(a.aliases || [])].some((x) => String(x || '').toLowerCase().includes(q));
+  const list = d.assets.filter(matches).sort((x, y) => (order[x.kind] - order[y.kind]) || assetName(x).localeCompare(assetName(y)));
+  const nm = (id) => { const x = d.assets.find((y) => y.id === id); return x ? assetName(x) : id; };
+  const rows = list.map((a) => h('tr', {},
+    h('td', {}, h('strong', {}, assetName(a)), a.name && a.name !== a.id ? h('div', { class: 'muted small mono' }, a.id) : null),
+    h('td', { class: 'small' }, a.kind, a.criticality === 'high' ? h('div', {}, h('span', { class: 'badge sev-high' }, 'high')) : null),
+    h('td', { class: 'mono small' }, a.ip || ''),
+    h('td', { class: 'small' }, a.role || '', (a.aliases && a.aliases.length) ? h('div', { class: 'muted mono' }, a.aliases.join(', ')) : null),
+    h('td', { class: 'small' }, a.runs_on ? h('div', {}, 'on ' + nm(a.runs_on)) : null,
+      (a.depends_on || []).map((x) => h('div', {}, nm(x.id), ' ', h('span', { class: 'muted' }, '(' + (x.type || 'other') + ')')))),
+    h('td', { class: 'nowrap' }, h('button', { class: 'btn small', onclick: () => topoEditStart(a, false) }, 'Edit'), ' ',
+      h('button', { class: 'icon', title: 'Remove', onclick: () => { if (confirm('Remove ' + assetName(a) + ' and the references to it?')) topoRemove(a.id); } }, '×'))));
+
+  const cov = t.cov;
+  const covPanel = h('div', { class: 'panel' },
+    h('div', { class: 'row' }, h('h3', { class: 'grow', style: 'margin:0' }, 'Coverage against the logs'),
+      h('select', { onchange: (e) => { t.covHours = Number(e.target.value); } }, [[24, '24 h'], [72, '3 days'], [168, '7 days'], [336, '14 days']].map(([n, l]) => h('option', { value: n, selected: n === t.covHours }, l))),
+      h('button', { class: 'btn', onclick: topoCoverage }, cov ? 'Refresh' : 'Check')),
+    h('p', { class: 'muted small' }, 'Compares the hosts and containers seen in VictoriaLogs with the saved topology (so it does not rot).'),
+    t.covError ? h('div', { class: 'err' }, t.covError) : null,
+    cov ? h('div', {},
+      h('h4', {}, 'Seen in the logs, not in the topology (' + cov.unknown.length + ')'),
+      cov.unknown.length ? h('table', {}, h('tbody', {}, cov.unknown.slice(0, 40).map((u) => h('tr', {},
+        h('td', {}, h('strong', {}, u.name)), h('td', { class: 'small' }, u.kind + (u.host ? ' on ' + u.host : '')),
+        h('td', { class: 'num small' }, fmtN(u.lines) + ' lines'),
+        h('td', {}, h('button', { class: 'btn small', onclick: () => {
+          const host = u.host ? topoFindByName(u.host) : null;
+          topoEditStart({ id: topoSlug(u.name), name: u.name, kind: u.kind, runs_on: host ? host.id : '' }, true);
+          document.getElementById('topo-editor') && document.getElementById('topo-editor').scrollIntoView();
+        } }, '+ add')))))) : h('p', { class: 'muted small' }, 'Everything seen in the logs is in the topology.'),
+      cov.unknown.length > 40 ? h('p', { class: 'muted small' }, '+' + (cov.unknown.length - 40) + ' more (the least frequent).') : null,
+      h('h4', {}, 'In the topology, not seen in the logs (' + cov.silent.length + ')'),
+      cov.silent.length ? h('p', { class: 'small' }, cov.silent.map((s) => s.name + ' (' + s.kind + ')').join(', '), h('span', { class: 'muted' }, ' - silent, renamed, or no longer there?'))
+        : h('p', { class: 'muted small' }, 'All hosts and containers in the topology appear in the logs.')) : null);
+
+  const tryPanel = h('div', { class: 'panel' },
+    h('h3', { style: 'margin-top:0' }, 'What the model would get'),
+    h('p', { class: 'muted small' }, 'Paste an alert or a log line: shows the devices found in it (by id, name, alias or IP) and the topology section sent to the model. Uses your unsaved edits.'),
+    h('textarea', { rows: 2, style: 'width:100%', placeholder: 'e.g. nfs: server 192.168.31.172 not responding (homesrv)', value: t.testText, oninput: (e) => { t.testText = e.target.value; } }),
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: topoTry }, 'Try it')),
+    t.testError ? h('div', { class: 'err' }, t.testError) : null,
+    t.test ? h('div', {}, h('p', { class: 'small' }, t.test.matched.length ? 'Found: ' + t.test.matched.join(', ') + ' (' + t.test.chars + ' characters)' : 'No device found in this text.'),
+      t.test.section.length ? h('pre', { class: 'mono small', style: 'white-space:pre-wrap' }, t.test.section.join('\n')) : null) : null);
+
+  const bar = h('div', { class: 'savebar' },
+    t.diff !== null ? diffEl(t.diff) : null,
+    t.error ? h('div', { class: 'err' }, t.error) : null,
+    h('div', { class: 'row', style: t.diff !== null ? 'margin-top:8px' : '' },
+      h('input', { class: 'grow', placeholder: 'Comment: what and why', value: t.comment, oninput: (e) => { t.comment = e.target.value; } }),
+      h('button', { class: 'btn', disabled: !dirty, onclick: topoDiff }, 'Preview diff'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => { S.topo.draft = clone(S.topo.base); S.topo.edit = null; S.topo.diff = null; S.topo.test = null; drawTopo(); } }, 'Discard edits'),
+      h('button', { class: 'btn', disabled: !dirty, onclick: () => topoSubmit('propose') }, 'Propose'),
+      isAdmin() ? h('button', { class: 'btn primary', disabled: !dirty, onclick: () => topoSubmit('save') }, 'Save') : null),
+    h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Revision #' + t.rev + (dirty ? ' · unsaved changes' : '') + (isAdmin() ? '' : ' · read-only token: use Propose, an admin approves.')));
+
+  renderShell([
+    h('h2', {}, 'Topology'),
+    h('p', { class: 'muted' }, 'Devices, IPs, roles and dependencies. For each alert or digest the service picks the devices that appear in it, adds what they depend on and what depends on them, and gives the model that short section; the model may claim a cause only along these dependencies.'),
+    t.edit ? topoEditor() : null,
+    h('div', { class: 'panel' },
+      h('div', { class: 'row' }, h('h3', { class: 'grow', style: 'margin:0' }, 'Devices (' + d.assets.length + ')'),
+        h('input', { placeholder: 'Filter…', value: t.filter, oninput: (e) => { t.filter = e.target.value; drawTopo(); const i = document.getElementById('topo-filter'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, id: 'topo-filter' }),
+        h('button', { class: 'btn', onclick: () => topoEditStart({ id: '', kind: 'host' }, true) }, '+ Add device')),
+      d.assets.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Device', 'Kind', 'IP', 'Role / log names', 'Depends on', ''].map((x) => h('th', {}, x)))), h('tbody', {}, rows))
+        : h('p', { class: 'muted' }, 'No devices yet. Add them here, or import a prepared file with scripts/logstack/console.ps1 import -Key topology.')),
+    covPanel, tryPanel, bar,
+  ]);
+}
+
 // ---------------------------------------------------------------- settings
 async function pageSettings() {
   const r = await api('GET', '/api/v1/config/settings');
@@ -621,7 +793,7 @@ async function pageHistory() {
   renderShell([
     h('h2', {}, 'History'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
-      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
     h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
     audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
       h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),

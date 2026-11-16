@@ -73,13 +73,14 @@ CFG = {
     "NOVELTY_SPIKE_FACTOR": _env_int("NOVELTY_SPIKE_FACTOR", 20),               # a minta gyakorisaga a sajat atlaganak ennyiszerese
     "NOVELTY_SPIKE_MIN": _env_int("NOVELTY_SPIKE_MIN", 500),                    # ... es legalabb ennyi sor egy ablakban
 }
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
 # A konzol (API/UI) parancsai a hatterszalnak: {"cmd": "digest", "hours": N} | {"cmd": "notify-test"}
 COMMANDS = queue.Queue()
 WAKE = threading.Event()  # a parancs azonnal felebreszti a ciklust
+TOPOLOGY = None         # topology.Topology (a konzol runtime-ja allitja; None = nincs topologia)
 DIGEST_EXTRAS = None      # opcionalis hivhato (t_from, t_to) -> [sorok]: kiegeszito szakasz a napi osszefoglalo bemenetehez
 
 SYSTEM_PROMPT = """You are an operations assistant for a small home lab (a few Linux servers, a NAS, Home Assistant, a router, two Wi-Fi access points). Reply in English, concisely.
@@ -91,6 +92,9 @@ Report every host reboot shown in the "Kernel boots" section as one info-level i
 Set status: new / ongoing / resolved (resolved if the logs show recovery, e.g. 'OK' after 'not responding', or Up after Down).
 A pre-filter has already removed known-harmless noise from the input. If the input has a "Known issues present" section, those problems are already acknowledged: NEVER report them (not even as info).
 If nothing else looks wrong, return an empty issues list and all_clear=true."""
+
+TOPOLOGY_PROMPT = """
+A "Topology" section lists the devices involved, with IPs, roles and dependencies ("depends on" = what a device needs, "needed by" = what breaks when it fails). Use it to name the impact and the likely root cause, and to recognise IPs and hostnames. Claim a causal link between two devices ONLY along a dependency path shown there; otherwise treat them as unrelated. Never invent devices or dependencies that are not listed."""
 
 INCIDENT_PROMPT_EXTRA = """
 This window was selected because an alert fired. Explain the alert using the correlated log lines, name the most likely root cause and the affected hosts. The alert itself must appear as an issue.
@@ -207,6 +211,28 @@ def log_volume(hours, by="pipeline", top=7, now=None):
         series = series[:top] + [other]
     return {"hours": hours, "by": by, "step_s": step_s, "from": iso(t_from), "to": iso(t_to),
             "total": sum(s["total"] for s in series), "series": series}
+
+
+def log_sources(hours):
+    """Mely hosztok es konteneres neveket latni a naplokban (a topologia lefedettsegehez): [{name, kind: host|container, host, source, lines}]."""
+    w = f"_time:{int(hours)}h"
+    hosts = {}
+    for q, field, src in ((f"{w} pipeline:syslog | stats by (host) count() as lines", "host", "syslog"),
+                          (f"{w} _HOSTNAME:* | stats by (_HOSTNAME) count() as lines", "_HOSTNAME", "journald"),
+                          (f"{w} pipeline:docker | stats by (host) count() as lines", "host", "docker")):
+        for r in vl_query(q, timeout=60):
+            name = str(r.get(field, "")).strip()
+            if name:
+                h = hosts.setdefault(name.lower(), {"name": name, "kind": "host", "host": "", "source": [], "lines": 0})
+                h["lines"] += int(r.get("lines", 0) or 0)
+                if src not in h["source"]:
+                    h["source"].append(src)
+    out = list(hosts.values())
+    for r in vl_query(f"{w} pipeline:docker | stats by (host, appname) count() as lines | sort by (lines desc) | limit 500", timeout=60):
+        name = str(r.get("appname", "")).strip()
+        if name:
+            out.append({"name": name, "kind": "container", "host": str(r.get("host", "")), "source": ["docker"], "lines": int(r.get("lines", 0) or 0)})
+    return out
 
 
 def window_totals(t_from, t_to):
@@ -534,6 +560,13 @@ def build_input(known, t_from, t_to, extra_lines=None, raw=None):
         out.append("== Known issues present (already acknowledged, do NOT report):")
         for note in known_hit.values():
             out.append(f"- {note}")
+    topo = TOPOLOGY
+    if topo:
+        # Az eszkozok, amelyekrol szo van: eloszor a riasztas / kiegeszito sorok, aztan a megtartott naplosorok hosztjai es azonositoi
+        texts = list(extra_lines or [])
+        texts += [f"{x.get('host', '')} {x.get('appname', '')}" for x in d[:30]] + [f"{x.get('host', '')} {x.get('appname', '')}" for x in a]
+        texts += [f"{x.get('_HOSTNAME', '')} {x.get('SYSLOG_IDENTIFIER', '')}" for x in b] + [str(x.get("_msg", "")) for x in c]
+        out.extend(topo.section(topo.match(texts, limit=8)))
     if extra_lines:
         out.extend(extra_lines)
     return "\n".join(out) + "\n"
@@ -746,6 +779,8 @@ def run_job(job, known, pool, dry_run=False):
         return "retry"
     extra = None
     system = SYSTEM_PROMPT
+    if TOPOLOGY:
+        system += TOPOLOGY_PROMPT
     if known.context:
         system += "\nLAB FACTS (trust these; do not suggest hardware or software that is not listed here):\n- " + "\n- ".join(known.context)
     if job["kind"] == "incident":

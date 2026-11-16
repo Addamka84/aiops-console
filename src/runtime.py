@@ -13,9 +13,10 @@ import uuid
 
 import aiops
 import settings
+import topology
 
 DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults", "known.default.json")
-KEYS = ("known", "settings")
+KEYS = ("known", "settings", "topology")
 
 
 class DocError(Exception):
@@ -36,6 +37,11 @@ def validate_doc(key, content):
         if errs:
             raise DocError(errs)
         return clean
+    if key == "topology":
+        errs = topology.validate(content)
+        if errs:
+            raise DocError(errs)
+        return content
     raise DocError([f"unknown config key {key!r} (expected one of {', '.join(KEYS)})"])
 
 
@@ -142,6 +148,7 @@ class Runtime:
         self._known = None
         self._known_rev = -1
         self._settings_rev = -1
+        self._topo_rev = -1
         self._raw = {}  # hours -> (monotonic, raw)  (a regex-teszt gyorsitotara)
 
     # ---- inditas
@@ -175,6 +182,11 @@ class Runtime:
                 cur = self.store.current("settings")
                 settings.apply(cur["content"] if cur else {})
                 self._settings_rev = sid
+            tid = self.store.revision_id("topology")
+            if tid != self._topo_rev:
+                cur = self.store.current("topology")
+                aiops.TOPOLOGY = topology.Topology(cur["content"] if cur else {})
+                self._topo_rev = tid
             kid = self.store.revision_id("known")
             if kid != self._known_rev:
                 cur = self.store.current("known")

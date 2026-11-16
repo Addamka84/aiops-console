@@ -19,6 +19,7 @@ import aiops
 import novelty
 import runtime
 import settings
+import topology
 from store import StoreError
 
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
@@ -47,6 +48,11 @@ class TestIn(BaseModel):
     hours: int = 24
     content: dict | None = None
     patch: dict | None = None
+
+
+class TopoTestIn(BaseModel):
+    text: str = ""
+    content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett topologia)
 
 
 class SnoozeIn(BaseModel):
@@ -151,7 +157,8 @@ def create_app(rt, tokens=None):
     @app.get("/api/v1/status")
     def status(_: Actor = Depends(read)):
         s = dict(aiops.STATUS)
-        s["config"] = {"known_rev": store.revision_id("known"), "settings_rev": store.revision_id("settings")}
+        s["config"] = {"known_rev": store.revision_id("known"), "settings_rev": store.revision_id("settings"),
+                       "topology_rev": store.revision_id("topology")}
         s["settings"] = settings.effective((store.current("settings") or {"content": {}})["content"])
         s["notify_configured"] = bool(aiops.CFG["HA_WEBHOOK_URL"])
         s["next_digest_utc"] = next_digest()
@@ -247,6 +254,40 @@ def create_app(rt, tokens=None):
         res["baseline"] = {"noise_patterns": base["noise_patterns"], "noise_lines": base["noise_lines"],
                            "known_patterns": base["known_patterns"], "kept_patterns": base["kept_patterns"]}
         return res
+
+    # ------------------------------------------------------------ topologia: proba es lefedettseg
+    def topo_of(content):
+        doc = content if content is not None else (store.current("topology") or {"content": {}})["content"]
+        try:
+            runtime.validate_doc("topology", doc)
+        except runtime.DocError as e:
+            fail(e)
+        return topology.Topology(doc)
+
+    @app.post("/api/v1/test/topology")
+    def test_topology(body: TopoTestIn, _: Actor = Depends(read)):
+        """Mit kapna a modell a topologiabol egy adott szovegre (riasztas / naplosor): a talalt eszkozok es a bemenet szakasza."""
+        topo = topo_of(body.content)
+        ids = topo.match([body.text], limit=8)
+        section = topo.section(ids)
+        return {"matched": ids, "section": section, "chars": sum(len(x) + 1 for x in section), "assets": len(topo.assets)}
+
+    cov_cache = {}
+
+    @app.get("/api/v1/topology/coverage")
+    def topology_coverage(hours: int = Query(168, ge=1, le=336), _: Actor = Depends(read)):
+        """Mi latszik a naplokban, de nincs a topologiaban ('unknown'), es mi van a topologiaban, de nem latszik ('silent'). 2 percig gyorsitotarazva."""
+        topo = topo_of(None)
+        hit = cov_cache.get(hours)
+        if hit and time.monotonic() - hit[0] < 120:
+            seen = hit[1]
+        else:
+            try:
+                seen = aiops.log_sources(hours)
+            except (OSError, ValueError) as e:
+                raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+            cov_cache[hours] = (time.monotonic(), seen)
+        return dict(topology.coverage(topo, seen), hours=hours, assets=len(topo.assets), seen=len(seen))
 
     # ------------------------------------------------------------ javaslatok (a felhasznalo hagyja jova)
     @app.post("/api/v1/proposals")
