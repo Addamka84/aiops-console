@@ -327,6 +327,7 @@ class NoiseTests(Base):
             "smart attribute": ([self.ids[CRIT]], r"smartd Device: /dev/sdb Failed SMART usage"),
             "matches generic error text": ([self.ids[EXPORT]], r"(?i)error|Exporting image"),
             "short alternative": ([self.ids[EXPORT]], r"Exporting image .* to /data|GET /health"),
+            "short alternative after an escaped bracket": ([self.ids[EXPORT]], r"\[supervisor\.docker\.manager\] Exporting image|GET /health"),
         }
         m = self.model_returning([self.f(refs, rx, title=name) for name, (refs, rx) in cases.items()])
         supervisor.run_once(self.store, model=m)
@@ -334,6 +335,13 @@ class NoiseTests(Base):
         self.assertEqual(r["findings"], [], r["rejected"])
         self.assertEqual({x["title"] for x in r["rejected"]}, set(cases))
         self.assertTrue(all(x["reason"] for x in r["rejected"]))
+
+    def test_digit_classes_match_the_number_placeholder(self):
+        # a sablonban a szamok <N>: a nyers sorokra irt \d+ regex ettol meg ervenyes (alpha.6-ban tevesen elutasitottuk)
+        m = self.model_returning([self.f([self.ids[EXPORT]], r"supervisor\.docker\.manager\] Exporting image \d+/addon-diyhue")])
+        supervisor.run_once(self.store, model=m)
+        r = self.last()
+        self.assertEqual((len(r["findings"]), r["rejected"]), (1, []))
 
     def test_regex_matching_an_error_among_unreferenced_findings_is_rejected(self):
         add_findings(self.store, [{"tmpl": "INFO [supervisor.docker.manager] Exporting image failed to start <N>", "level": "info"}])

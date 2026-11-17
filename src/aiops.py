@@ -101,7 +101,7 @@ CFG = {
     "SUPERVISOR_REASONING": os.environ.get("SUPERVISOR_REASONING", "").strip(),  # "" | low | medium | high (reasoning_effort; ures = nem kuldjuk)
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.6"
+__version__ = "2.0.0-alpha.7"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 

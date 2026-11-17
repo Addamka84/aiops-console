@@ -35,7 +35,8 @@ Answer with ONE JSON object: {"summary": string (max 400 chars), "findings": [{"
 """
 PROMPTS = {
     "overview": _BASE + 'Task "overview": the input is a snapshot of alerts, incidents, detectors, novelty counts and proposals for the last hours; read the "notes" field first, it explains how to interpret the numbers. '
-                        'Do not call something a problem or "unresolved" unless the data says so. Set "task" to "overview", "refs" to [] and "regex" to "".',
+                        'Do not call something a problem or "unresolved" unless the data says so. Do NOT list non-events as findings (e.g. "no alerts", "detectors idle", "approved changes were applied", a count of known items): that belongs in the summary. '
+                        'Write a finding only for something that needs a human decision or attention now (a failing detector, an alert storm, a flapping alert, many pending proposals, a recent high-severity incident). Zero findings is the normal answer for a quiet system. Set "task" to "overview", "refs" to [] and "regex" to "".',
     "noise": _BASE + 'Task "noise": the input "items" are new-pattern / rate-spike findings of the novelty detector (ref, host, ident, level, hits, template; numbers in templates are <N>). '
               'Pick patterns that are clearly harmless, repetitive background chatter (routine info/debug messages, periodic status, cloud polling) and suggest ONE regex per group of similar patterns. '
               'Set "task" to "noise", "refs" to the refs of the items the regex is meant to silence, and "regex" to a SIMPLE Python regular expression (a literal part of the message, escaped; no nested quantifiers, no ".*" alone). '
@@ -397,6 +398,12 @@ _CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1
 _NESTED_Q = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
 
 
+def _tmatch(c, template):
+    """A regex illeszkedik a sablonra? A sablonban a szamok <N> helyorzok: a nyers sorokra irt regex (pl. \\d+) is illeszkedjen, ezert a helyorzot
+    tobbjegyu szamra cserelve is probaljuk (mindket valtozat szamit, a vedelem igy a szigorubb)."""
+    return bool(c.search(template) or c.search(template.replace("<N>", "123")))
+
+
 def check_noise_regex(rx, ref_templates, all_findings):
     """A javasolt zaj-regex ellenorzese. -> None (rendben) vagy az elutasitas oka.
     Nem takarhat el hibajellegu mintat, nem lehet tul szeles, illeszkednie kell a hivatkozott sablonok legalabb egyikere."""
@@ -408,17 +415,18 @@ def check_noise_regex(rx, ref_templates, all_findings):
         c = re.compile(rx)
     except re.error as e:
         return f"invalid regex ({e})"
-    if "(" not in rx and "[" not in rx:   # felso szintu alternativak: mindegyik legyen eleg specifikus (pl. egy "GET /health" tag mas szolgaltatasokat is elnyelne)
+    unesc = re.sub(r"\\.", "", rx)        # az escape-elt jelek (\[ \( \|) literalok, nem csoport / karakterosztaly / alternativa
+    if "(" not in unesc and "[" not in unesc:   # felso szintu alternativak: mindegyik legyen eleg specifikus (pl. egy "GET /health" tag mas szolgaltatasokat is elnyelne)
         alts = re.split(r"(?<!\\)\|", rx)
         if len(alts) > 1 and any(len(a) < 14 for a in alts):
             return "an alternative is too short (too broad)"
     for can in _CANARIES:
         if c.search(can):
             return "matches generic error text (too broad)"
-    hit = [t for t in ref_templates if c.search(t)]
+    hit = [t for t in ref_templates if _tmatch(c, t)]
     if not hit:
         return "does not match any referenced pattern"
-    matched = [(lvl, t) for lvl, t in all_findings if c.search(t)]
+    matched = [(lvl, t) for lvl, t in all_findings if _tmatch(c, t)]
     for lvl, t in matched:
         if lvl in _DANGER_LEVELS or _DANGER_RX.search(t):
             return "matches an error-like pattern: needs human review"
