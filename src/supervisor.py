@@ -41,6 +41,7 @@ PROMPTS = {
     "noise": _BASE + 'Task "noise": the input "items" are new-pattern / rate-spike findings of the novelty detector (ref, host, ident, level, hits, template; numbers in templates are <N>). '
               'Pick patterns that are clearly harmless, repetitive background chatter (routine info/debug messages, periodic status, cloud polling) and suggest ONE regex per group of similar patterns. '
               'Set "task" to "noise", "refs" to the refs of the items the regex is meant to silence, and "regex" to a SIMPLE Python regular expression (a literal part of the message, escaped; no nested quantifiers, no ".*" alone). '
+              'In the templates every number is shown as <N>; the regex is matched against the template as shown, so write numeric parts as (<N>|\\d+) or .* (a bare \\d+ does not match <N>). '
               'Anchor the regex to the source: include a distinctive part of the logger / component / service name from the template (e.g. "dreame_vacuum\\.dreame\\.map\\] Request map data") so it cannot match other services; a bare generic phrase such as "GET /status" is too broad. '
               'NEVER suggest silencing anything that looks like an error, failure, warning about data/disk/security, crash or out-of-memory. When unsure, do not suggest it. Severity "info".',
     "incident_review": _BASE + 'Task "incident_review": the input "items" are recent AI-triaged incidents (ref, alert, summary, correlated_alerts, root_hypothesis, root_confidence, ungrounded_hosts, issues with evidence and likely_cause); read the "notes" field first. '
@@ -287,12 +288,17 @@ def make_model():
 # ---------------------------------------------------------------- feladat-bemenetek (csak olvaso)
 
 def noise_input(store):
-    """Nyitott novelty-leletek a zajkarbantartashoz. -> (bemenet, {ref: sablon}, [(szint, sablon)] az osszes nyitott leletrol)"""
+    """Nyitott novelty-leletek a zajkarbantartashoz. -> (bemenet, {ref: sablon}, [(szint, sablon)] az osszes nyitott leletrol)
+    A mar zajnak / szuneteltetesnek / ismert ugynek minosulo leletek (a regi nyitott leletek a szabaly felvetele elott keletkeztek) nem kerulnek
+    a modellhez: nincs ertelme ujra zajt javasolni rajuk (kvotat fogyasztana); a vedelmek kontextusa viszont az OSSZES nyitott lelet marad."""
     rows = store.nov_findings("open", limit=max(10, aiops.CFG["SUPERVISOR_MAX_ITEMS"]))
+    known = GET_KNOWN() if GET_KNOWN else None
+    fresh = [f for f in rows if known is None or known.classify_idx(f"{f['host']} | {f['ident']} | {f['tmpl']}")[0] == "keep"]
     items = [{"ref": f"n{f['id']}", "kind": f["kind"], "host": f["host"], "ident": f["ident"], "level": f["level"], "hits": f["hits"],
-              "template": str(f["tmpl"])[:300]} for f in rows]
-    refs = {f"n{f['id']}": str(f["tmpl"]) for f in rows}
-    allf = [(str(f["level"]).lower(), str(f["tmpl"])) for f in rows]
+              "template": str(f["tmpl"])[:300]} for f in fresh]
+    full = lambda f: f"{f['host']} | {f['ident']} | {f['tmpl']}"   # ugyanaz a szoveg, amire a zajlista az elo osztalyozasnal fut
+    refs = {f"n{f['id']}": str(full(f)) for f in rows}
+    allf = [(str(f["level"]).lower(), str(full(f))) for f in rows]
     return {"task": "noise", "items": items}, refs, allf
 
 
@@ -400,6 +406,17 @@ _CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1
 _NESTED_Q = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
 
 
+_NUM_RX = re.compile(r"(?<!\\)(?:\\d\+|\[0-9\]\+)")
+
+
+def normalize_noise_regex(rx):
+    """A sablonokban a szamok <N> helyorzok, a nyers sorokban szamok: a zajlista ugyanazt a regexet mindkettore alkalmazza (a meglevo szabalyok is
+    '(<N>|\\d+)'-t hasznalnak). A modell \\d+ / [0-9]+ reszeit ezert (?:<N>|\\d+)-ra irjuk at (csak ha a regex meg nem tartalmaz <N>-t)."""
+    if not isinstance(rx, str) or "<N>" in rx:
+        return rx
+    return _NUM_RX.sub(lambda m: r"(?:<N>|\d+)", rx)
+
+
 def _tmatch(c, template):
     """A regex illeszkedik a sablonra? A sablonban a szamok <N> helyorzok: a nyers sorokra irt regex (pl. \\d+) is illeszkedjen, ezert a helyorzot
     tobbjegyu szamra cserelve is probaljuk (mindket valtozat szamit, a vedelem igy a szigorubb)."""
@@ -427,9 +444,9 @@ def check_noise_regex(rx, ref_templates, all_findings):
     for can in _CANARIES:
         if c.search(can):
             return "matches generic error text (too broad)"
-    hit = [t for t in ref_templates if _tmatch(c, t)]
+    hit = [t for t in ref_templates if c.search(t)]   # a sablon ALAKJARA kell illeszkedni (a szamok <N>): a novelty-leletet csak igy nyeli el a szabaly
     if not hit:
-        return "does not match any referenced pattern"
+        return "does not match any referenced pattern as stored (numbers appear as <N>)"
     matched = [(lvl, t) for lvl, t in all_findings if _tmatch(c, t)]
     for lvl, t in matched:
         if lvl in _DANGER_LEVELS or _DANGER_RX.search(t):
@@ -476,6 +493,7 @@ def parse_report(content, task="overview", ctx=None):
                 continue
         elif task == "noise":
             known = ctx.get("refs", {})
+            f["regex"] = normalize_noise_regex(f["regex"])
             f["refs"] = [r for r in f["refs"] if r in known]
             reason = "no valid pattern reference" if not f["refs"] else check_noise_regex(f["regex"], [known[r] for r in f["refs"]], ctx.get("all", []))
             if reason:
@@ -582,6 +600,7 @@ def fit_input(obj, system):
 PROPOSAL_AUTHOR = "supervisor"
 REJECTED_COOLDOWN_DAYS = 30       # az elutasitott javaslatot ennyi napig nem adja be ujra
 MAX_PENDING = 10                  # a supervisor legfeljebb ennyi fuggo javaslatot hagy egyszerre
+MIN_PROPOSAL_LINES = 3            # detektor-javaslatot csak olyan szurore ad be, ami a 7 napos visszateszten legalabb ennyi sort talal (az egyszeri sor csak a jelentesben latszik)
 _FP_RX = re.compile(r"\[sup:([0-9a-f]{10})\]")
 
 
@@ -641,6 +660,10 @@ def make_proposals(store, findings, now=None):
                 d = f.get("draft")
                 if not d:
                     skipped.append({"title": title, "reason": "no valid detector draft"})
+                    continue
+                bt0 = f.get("backtest") or {}
+                if bt0.get("total", 0) < MIN_PROPOSAL_LINES:
+                    skipped.append({"title": title, "reason": f"too rare to alert on automatically ({bt0.get('total', 0)} matching line(s) in 7 days; shown in the report only)"})
                     continue
                 key, fp = "detectors", _fingerprint("detector", d["id"], d["query"])
                 cur = (store.current("detectors") or {"content": {"detectors": []}})["content"]
@@ -761,7 +784,7 @@ def run_once(store, now=None, model=None):
         report = redact_obj({"summary": summary[:1500], "findings": findings[:MAX_TOTAL_FINDINGS], "rejected": rejected[:MAX_TOTAL_FINDINGS], "tasks": tasks})
         if aiops.CFG["SUPERVISOR_MODE"] == "propose" and status in ("ok", "partial", "budget"):
             try:
-                made, skipped = make_proposals(store, report["findings"], now)
+                made, skipped = make_proposals(store, findings[:MAX_TOTAL_FINDINGS], now)   # a SZURETLEN, validalt talalatokbol (a titokszuro pl. egy hosszu detektor-id-t is lecserelne)
             except Exception as e:  # noqa: BLE001 - a javaslat-beadas hibaja ne vesse el a jelentest
                 made, skipped = [], [{"title": "-", "reason": f"proposal step failed: {type(e).__name__}"}]
                 aiops.log(f"supervisor: javaslat-beadas hiba: {type(e).__name__}: {e}", key="sup_prop")

@@ -340,12 +340,34 @@ class NoiseTests(Base):
             self.assertEqual({x["title"] for x in r["rejected"]}, set(part))
             self.assertTrue(all(x["reason"] for x in r["rejected"]))
 
-    def test_digit_classes_match_the_number_placeholder(self):
-        # a sablonban a szamok <N>: a nyers sorokra irt \d+ regex ettol meg ervenyes (alpha.6-ban tevesen elutasitottuk)
+    def test_digit_classes_are_rewritten_to_match_the_number_placeholder(self):
+        # a sablonban a szamok <N>: egy csupasz \d+ nem illeszkedne ra, a novelty-lelet nyitva maradna (elo tapasztalat: Shelly, #9).
+        # A \d+ / [0-9]+ reszeket (?:<N>|\d+)-ra irjuk at, ahogy a meglevo zajszabalyok is teszik.
+        import re
         m = self.model_returning([self.f([self.ids[EXPORT]], r"supervisor\.docker\.manager\] Exporting image \d+/addon-diyhue")])
         supervisor.run_once(self.store, model=m)
         r = self.last()
         self.assertEqual((len(r["findings"]), r["rejected"]), (1, []))
+        rx = r["findings"][0]["regex"]
+        self.assertIn(r"(?:<N>|\d+)", rx)
+        self.assertTrue(re.search(rx, EXPORT))                       # a sablon eredeti alakjara illeszkedik
+        self.assertTrue(re.search(rx, EXPORT.replace("<N>", "4711")))   # a nyers sorra is
+
+    def test_a_regex_that_matches_only_raw_digits_is_rejected(self):
+        # [0-9]{3} nem irhato at biztonsagosan: a sablon (<N>) alakjara nem illeszkedik -> hatastalan lenne a novelty-leletre
+        m = self.model_returning([self.f([self.ids[EXPORT]], r"supervisor\.docker\.manager\] Exporting image [0-9]{3}/addon-diyhue")])
+        supervisor.run_once(self.store, model=m)
+        r = self.last()
+        self.assertEqual(r["findings"], [])
+        self.assertIn("as stored", r["rejected"][0]["reason"])
+
+    def test_normalize_noise_regex(self):
+        n = supervisor.normalize_noise_regex
+        self.assertEqual(n(r"shellypro3em-\d+ changed"), r"shellypro3em-(?:<N>|\d+) changed")
+        self.assertEqual(n(r"a [0-9]+ b \d+"), r"a (?:<N>|\d+) b (?:<N>|\d+)")
+        self.assertEqual(n(r"x (<N>|\d+) y"), r"x (<N>|\d+) y")             # mar tartalmaz <N>-t: valtozatlan
+        self.assertEqual(n(r"literal \\d+ stays"), r"literal \\d+ stays")    # escape-elt backslash + d: nem szamosztaly
+        self.assertEqual(n(r"no digits here at all"), r"no digits here at all")
 
     def test_regex_matching_an_error_among_unreferenced_findings_is_rejected(self):
         add_findings(self.store, [{"tmpl": "INFO [supervisor.docker.manager] Exporting image failed to start <N>", "level": "info"}])
@@ -381,6 +403,21 @@ class NoiseTests(Base):
         supervisor.run_once(s2, model=m)
         self.assertEqual(m.calls, [])
         self.assertEqual(s2.sup_runs()[0]["status"], "ok")
+
+    def test_findings_already_covered_by_the_configuration_are_not_sent_to_the_model(self):
+        class K:
+            def classify_idx(self, text, now=None):
+                return ("noise", 0) if "Exporting image" in text else ("keep", None)
+        supervisor.GET_KNOWN = lambda: K()
+        try:
+            inp, refs, allf = supervisor.noise_input(self.store)
+        finally:
+            supervisor.GET_KNOWN = None
+        sent = {i["template"] for i in inp["items"]}
+        self.assertNotIn(EXPORT, sent)                          # mar zaj: nem megy a modellhez
+        self.assertIn(MAP[:100], {t[:100] for t in sent})
+        self.assertEqual(len(allf), 4)                          # a vedelmek kontextusa viszont az osszes nyitott lelet
+        self.assertIn(self.ids[EXPORT], refs)
 
     def test_mock_model_suggests_only_valid_noise(self):
         supervisor.run_once(self.store)               # mock
@@ -638,6 +675,7 @@ class Dispatch(FakeModel):
 
 
 NOISE_RX = r"supervisor\.docker\.manager\] Exporting image \d+/addon-diyhue"
+NOISE_RX_STORED = r"supervisor\.docker\.manager\] Exporting image (?:<N>|\d+)/addon-diyhue"   # a javaslat az atirt (sablon-alakra is illeszkedo) regexet tarolja
 SMART_Q = 'host:=homenas2 appname:=smartd "FAILED SMART self-check"'
 
 
@@ -684,7 +722,7 @@ class ProposeTests(CoverageBase):
         for p in self.mine():
             self.store.decide(p["id"], True, "admin")
         known = self.store.current("known")["content"]
-        self.assertIn(NOISE_RX, known["noise"])
+        self.assertIn(NOISE_RX_STORED, known["noise"])
         det = [d for d in self.store.current("detectors")["content"]["detectors"] if d["id"] == "gap-homenas2-smartd"]
         self.assertEqual(len(det), 1)
         self.assertFalse(det[0]["enabled"])                      # az engedelyezes kulon (emberi) lepes
@@ -723,6 +761,29 @@ class ProposeTests(CoverageBase):
         self.assertEqual(r["proposals"], [])
         self.assertIn("daily", r["proposals_skipped"][0]["reason"])
 
+    def test_long_detector_id_is_not_clobbered_by_the_redaction(self):
+        # alpha.11 elo hiba: a 41 karakteres id-t a titokszuro <redacted-token>-re cserelte, mielott a javaslat keszult volna
+        self.syslog.append({"host": "homenas2", "appname": "systemd-networkd-wait-online", "hits": "10", "sample": "Timeout occurred while waiting for network connectivity."})
+        inp, _ = supervisor.coverage_input()
+        ref = next(i["ref"] for i in inp["items"] if i["ident"] == "systemd-networkd-wait-online")
+        q = 'host:=homenas2 appname:=systemd-networkd-wait-online "Timeout occurred"'
+        gap = self.finding_for(ref, q)
+        r = self.go(model=Dispatch({"noise": [], "coverage_gap": [gap]}))
+        self.assertEqual([x["key"] for x in r["proposals"]], ["detectors"])
+        ids = [d["id"] for d in self.store.proposal(r["proposals"][0]["id"])["content"]["detectors"]]
+        self.assertIn("gap-homenas2-systemd-networkd-wait-online", ids)
+        self.assertEqual(r["proposals_skipped"], [])
+
+    def finding_for(self, ref, query):
+        return {"task": "coverage_gap", "severity": "medium", "title": "Timeouts", "detail": "10 lines", "refs": [ref], "regex": "", "query": query}
+
+    def test_too_rare_filters_are_not_filed(self):
+        self.bt_result = {"hours": 168, "firings": 1, "total": 2}
+        r = self.go(noise=False)
+        self.assertEqual(r["proposals"], [])
+        self.assertIn("too rare", r["proposals_skipped"][0]["reason"])
+        self.assertTrue(r["findings"])                            # a jelentesben viszont megmarad
+
     def test_pending_cap(self):
         aiops.CFG["SUPERVISOR_MAX_PROPOSALS_PER_DAY"] = 100     # a kitoltok is a mai szamlalot novelik: a fuggo-limitet vizsgaljuk
         for i in range(supervisor.MAX_PENDING):
@@ -733,7 +794,7 @@ class ProposeTests(CoverageBase):
 
     def test_already_in_configuration_is_skipped(self):
         cur = self.store.current("known")["content"]
-        self.store.put("known", dict(cur, noise=list(cur.get("noise", [])) + [NOISE_RX]), "admin", "manual")
+        self.store.put("known", dict(cur, noise=list(cur.get("noise", [])) + [NOISE_RX_STORED]), "admin", "manual")
         d = supervisor.detector_draft({"host": "homenas2", "ident": "smartd"}, {}, SMART_Q)
         self.store.put("detectors", {"detectors": [d]}, "admin", "manual")
         r = self.go()
