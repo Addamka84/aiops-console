@@ -96,8 +96,10 @@ CFG = {
     "SUPERVISOR_TIMEOUT_S": _env_int("SUPERVISOR_TIMEOUT_S", 300),
     "SUPERVISOR_MAX_TOKENS_PER_DAY": _env_int("SUPERVISOR_MAX_TOKENS_PER_DAY", 400000),  # koltsegkeret (UTC nap); tullepes utan modellhivas nelkuli jelentes
     "SUPERVISOR_KEY": os.environ.get("SUPERVISOR_KEY", "").strip(),
+    "SUPERVISOR_TASKS": [t.strip() for t in os.environ.get("SUPERVISOR_TASKS", "overview,noise,incident_review").split(",") if t.strip()],
+    "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.1"
+__version__ = "2.0.0-alpha.2"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 

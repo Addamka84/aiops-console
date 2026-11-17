@@ -53,6 +53,8 @@ SPEC = {
     "SUPERVISOR_MODEL": {"type": "str0", "desc": "Supervisor model name (separate from MODEL)."},
     "SUPERVISOR_NUM_CTX": {"type": "int", "min": 2048, "max": 1048576, "desc": "Largest supervisor input (tokens; estimated as 4 characters per token)."},
     "SUPERVISOR_TIMEOUT_S": {"type": "int", "min": 10, "max": 3600, "desc": "Maximum duration of one supervisor model call (s)."},
+    "SUPERVISOR_TASKS": {"type": "tasks", "desc": "Supervisor tasks per run (comma separated): overview (state snapshot), noise (suggests noise regexes for open novelty findings; validated, report only), incident_review (reviews recent AI incidents)."},
+    "SUPERVISOR_MAX_ITEMS": {"type": "int", "min": 10, "max": 300, "desc": "Largest number of items (novelty findings) one supervisor task reads; incidents: a quarter of it."},
     "SUPERVISOR_MAX_TOKENS_PER_DAY": {"type": "int", "min": 1000, "max": 100000000, "desc": "Token budget per UTC day; once exceeded, runs write a report without calling the model."},
 }
 
@@ -78,6 +80,21 @@ def _coerce(key, spec, v):
         if not isinstance(v, str) or not v.strip():
             return None, "must be a non-empty string"
         return v.strip(), None
+    if t == "tasks":
+        import supervisor
+        items = v.split(",") if isinstance(v, str) else v
+        if not isinstance(items, list):
+            return None, "must be a comma separated list of tasks"
+        out = []
+        for x in items:
+            x = str(x).strip()
+            if not x:
+                continue
+            if x not in supervisor.TASKS:
+                return None, f"unknown task {x!r}; expected {', '.join(supervisor.TASKS)}"
+            if x not in out:
+                out.append(x)
+        return out, None
     if t in ("url0", "str0"):   # ures ertek megengedett (= nincs beallitva)
         if not isinstance(v, str):
             return None, "must be a string"

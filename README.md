@@ -64,7 +64,11 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   configuration and never creates proposals in this version. Guards: secrets are redacted from the model input and output, the model output is
   schema-checked and every unknown key is dropped, a daily token budget (`SUPERVISOR_MAX_TOKENS_PER_DAY`; beyond it a rule-based report is written without calling the model),
   its own thread (a slow or dead model endpoint never delays triage), `off` makes no model call. `SUPERVISOR_API=mock` gives a deterministic report for tests and demos.
-  Planned: noise / incident-review / coverage-gap / detector tasks, then proposals (admin approval stays) - see `docs/aiops-supervisor-terv.md` in the lab repo.
+  Tasks (`SUPERVISOR_TASKS`): `overview` (state snapshot), `noise` (suggests a noise regex for open novelty findings; **deterministic guards** reject a regex that
+  is too short/broad, has nested quantifiers, matches generic error text, matches no referenced pattern, or matches ANY open finding that looks like an error/failure/SMART/OOM -
+  rejected suggestions are listed with the reason; accepted ones are only shown, never applied), `incident_review` (reviews recent AI incidents for unsupported causes, ungrounded hosts,
+  overconfident root causes). Each task has its own prompt and input cap; references the model returns must exist in the input; a run is `ok`, `partial` (a task failed), `budget` or `error`.
+  Planned: coverage-gap / detector tasks, then proposals (admin approval stays) - see `docs/aiops-supervisor-terv.md` in the lab repo.
 
 ## Run
 See [`docker-compose.example.yml`](docker-compose.example.yml). Required: `VL_URL`, `OLLAMA_URLS`, `CONSOLE_ADMIN_TOKEN`.

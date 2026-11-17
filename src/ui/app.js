@@ -854,6 +854,7 @@ async function pageSettings() {
     const raw = inputs[s.key].value;
     if (s.type === 'int') return raw.trim() === '' ? raw : Number(raw);
     if (s.type === 'urls') return raw.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (s.type === 'tasks') return raw.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
     return raw.trim();
   };
   const overrides = () => {
@@ -879,7 +880,7 @@ async function pageSettings() {
   const field = (s) => {
     let el;
     if (s.type === 'choice') el = h('select', {}, s.choices.map((c) => h('option', { value: c, selected: c === val(s) }, c)));
-    else if (s.type === 'urls') el = h('textarea', { class: 'mono', rows: 2, value: toText(val(s)) });
+    else if (s.type === 'urls' || s.type === 'tasks') el = h('textarea', { class: 'mono', rows: 2, value: toText(val(s)) });
     else el = h('input', Object.assign({ class: s.type === 'int' ? '' : 'mono', value: toText(val(s)), style: 'width:100%' }, s.type === 'int' ? { type: 'number', min: s.min, max: s.max } : {}));
     el.addEventListener('input', upd); el.addEventListener('change', upd);
     inputs[s.key] = el;
@@ -936,11 +937,15 @@ async function pageSupervisor() {
   };
   const pct = st.tokens_budget ? Math.min(100, Math.round(100 * st.tokens_today / st.tokens_budget)) : 0;
   const runCard = (r) => h('div', { class: 'panel' },
-    h('div', { class: 'row' }, h('strong', {}, 'Run #' + r.id), h('span', { class: 'badge ' + (r.status === 'ok' ? 'b-up' : r.status === 'budget' ? 'b-unknown' : 'b-down') }, r.status),
+    h('div', { class: 'row' }, h('strong', {}, 'Run #' + r.id), h('span', { class: 'badge ' + (r.status === 'ok' ? 'b-up' : r.status === 'budget' || r.status === 'partial' ? 'b-unknown' : 'b-down') }, r.status),
       h('span', { class: 'muted small grow' }, fmtTime(r.ts) + ' · ' + r.model + ' · ' + r.secs + ' s · ' + r.tokens + ' tokens')),
     h('p', {}, r.report.summary || ''),
-    r.report.findings.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Severity', 'Finding', 'Detail'].map((x) => h('th', {}, x)))),
-      h('tbody', {}, r.report.findings.map((f) => h('tr', {}, h('td', {}, sevBadge(f.severity)), h('td', {}, f.title), h('td', { class: 'small' }, f.detail))))) : null);
+    h('div', { class: 'muted small' }, Object.entries(r.report.tasks || {}).map(([n, t]) => n + ': ' + t.status + (t.items !== undefined ? ' (' + t.items + ' items, ' + t.findings + ' findings, ' + t.rejected + ' rejected)' : '') + (t.error ? ' - ' + t.error : '')).join(' · ')),
+    r.report.findings.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Task', 'Severity', 'Finding', 'Detail'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, r.report.findings.map((f) => h('tr', {}, h('td', { class: 'mono small' }, f.task), h('td', {}, sevBadge(f.severity)), h('td', {}, f.title),
+        h('td', { class: 'small' }, f.detail, f.regex ? h('div', {}, 'Suggested noise regex: ', h('code', {}, f.regex)) : null, f.refs && f.refs.length ? h('div', { class: 'muted' }, 'refs: ' + f.refs.join(', ')) : null))))) : null,
+    (r.report.rejected || []).length ? h('details', {}, h('summary', { class: 'muted small' }, (r.report.rejected.length) + ' suggestion(s) rejected by the guards'),
+      h('ul', { class: 'small' }, r.report.rejected.map((x) => h('li', {}, x.title + ': ' + x.reason + (x.regex ? ' (' + x.regex + ')' : ''))))) : null);
   renderShell([
     h('h2', {}, 'Supervisor'),
     h('div', { class: 'note' }, 'Read-only review of the service state by a separate model. It never changes anything; in this version it only writes reports. Off by default.'),
