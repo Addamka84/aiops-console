@@ -112,7 +112,7 @@ class Store:
     def add_proposal(self, key, content, author, comment, base_rev):
         with self.lock:
             cur = self.db.execute("INSERT INTO proposals (ts, author, key, base_rev, content, comment) VALUES (?,?,?,?,?,?)",
-                                  (now_iso(), author, key, base_rev, json.dumps(content, ensure_ascii=False, sort_keys=True), comment[:300]))
+                                  (now_iso(), author, key, base_rev, json.dumps(content, ensure_ascii=False, sort_keys=True), comment[:700]))
             self._audit(author, f"proposal.add.{key}", f"proposal {cur.lastrowid}: {comment[:120]}")
             self.db.commit()
             return cur.lastrowid

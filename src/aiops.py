@@ -28,6 +28,9 @@ import time
 import urllib.parse
 import urllib.request
 
+import regex_guard
+from redact import redact, redact_obj
+
 
 def _env_int(name, default):
     try:
@@ -103,7 +106,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.13"
+__version__ = "2.0.0-alpha.14"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -369,6 +372,13 @@ def validate_known(d):
                 errs.append(f"snoozes[{i}]: 'until' must be a UTC time like 2026-01-31T12:00:00Z")
             if "note" in s and not isinstance(s["note"], str):
                 errs.append(f"snoozes[{i}]: 'note' must be a string")
+    if not errs:   # katasztrofalis visszalepes (ReDoS) elleni proba: a regexek kulon alfolyamatban, idokorlattal (regex_guard.py)
+        rxs = [x for x in d.get("noise", []) if isinstance(x, str)]
+        rxs += [v for k in d.get("known_issues", []) for v in (k.get("match"), k.get("match_output")) if isinstance(v, str)]
+        rxs += [x["regex"] for x in d.get("snoozes", []) if isinstance(x.get("regex"), str)]
+        bad = regex_guard.check(rxs)
+        if bad:
+            errs.append(bad)
     return errs
 
 
@@ -948,7 +958,7 @@ def run_job(job, known, pool, dry_run=False):
             log(f"digest-kiegeszites sikertelen: {type(e).__name__}: {e}", key="digest_extras")
     try:
         raw = collect(t_from, t_to)
-        user = build_input(known, t_from, t_to, extra, raw=raw)
+        user = redact(build_input(known, t_from, t_to, extra, raw=raw))   # a naplo titkai (token=, Bearer, URL-ben jelszo) ne keruljenek a modellhez
     except (OSError, ValueError) as e:
         log(f"VictoriaLogs lekerdezes sikertelen: {e}", key="vl_query")
         return "retry"
@@ -956,7 +966,7 @@ def run_job(job, known, pool, dry_run=False):
     t0 = time.monotonic()
     try:
         resp = ollama_chat(ep["url"], system, user)
-        out = parse_output(resp["message"]["content"])
+        out = redact_obj(parse_output(resp["message"]["content"]))   # a modell kimenete is (tarba, UI-ra, ertesitesbe kerul)
     except (OllamaError, ValueError, KeyError) as e:
         pool.mark_down(ep, f"generalas sikertelen: {e}")
         return "retry"
@@ -970,7 +980,7 @@ def run_job(job, known, pool, dry_run=False):
         "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded,
     }
     if job["kind"] == "incident":
-        result["alert"] = job.get("alert_text", "")
+        result["alert"] = redact(job.get("alert_text", ""))
         result["alert_key"] = job.get("key", "")
         if job.get("correlation"):
             result["correlation"] = job["correlation"]

@@ -80,38 +80,9 @@ class ModelError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- titokszuro (a modell bemenete es kimenete is)
+# a titokszuro kozos modulban (redact.py): a triazs-ag is hasznalja
+from redact import redact, redact_obj  # noqa: E402,F401
 
-_RX_PRIVKEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|$)", re.S)
-_RX_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
-_RX_PARAM = re.compile(r"(?i)\b([A-Za-z0-9_.-]*(?:signature|accesskeyid|access_key|accesskey|token|apikey|api_key|secret|passwd|password|authorization|credential)[A-Za-z0-9_.-]*)"
-                       r"(\s*[=:]\s*)(?!<redacted>)(\"[^\"]*\"|'[^']*'|[^\s&;,\"'}]+)")
-_RX_JSONKEY = re.compile(r"(?i)(\"[A-Za-z0-9_.-]*(?:password|passwd|token|secret|api_?key|signature|credential)[A-Za-z0-9_.-]*\"\s*:\s*)\"[^\"]*\"")
-_RX_LONG = re.compile(r"(?<![A-Za-z0-9_/.-])(?=[A-Za-z0-9_+=-]*\d)(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{40,}(?![A-Za-z0-9_/.-])")
-
-
-def redact(text):
-    """Titkok es hozzaferesi azonositok kiszurese (privat kulcs, Bearer/Basic, kulcs=ertek parok, JSON titokmezok, hosszu tokenek)."""
-    if not isinstance(text, str):
-        return text
-    t = _RX_PRIVKEY.sub("<redacted-private-key>", text)
-    t = _RX_BEARER.sub(lambda m: m.group(1) + " <redacted>", t)
-    t = _RX_JSONKEY.sub(lambda m: m.group(1) + '"<redacted>"', t)
-    t = _RX_PARAM.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", t)
-    return _RX_LONG.sub("<redacted-token>", t)
-
-
-def redact_obj(o):
-    if isinstance(o, str):
-        return redact(o)
-    if isinstance(o, list):
-        return [redact_obj(x) for x in o]
-    if isinstance(o, dict):
-        return {k: redact_obj(v) for k, v in o.items()}
-    return o
-
-
-# ---------------------------------------------------------------- koltsegkeret (UTC nap)
 
 def _day(now=None):
     return (now or aiops.utcnow()).strftime("%Y-%m-%d")
@@ -378,6 +349,19 @@ def backtest_query(query, hours=168):
     return {"hours": hours, "firings": bt["firings"], "total": bt["total"]}
 
 
+def check_coverage_shape(query, item):
+    """A modell javasolta szuro SZERKEZETE: a csoport ket kotelezo konjunktuma (host:=H ident:=I, az elem szurojenek eleje) egesz szokent szerepeljen,
+    es a szuro csak SZUKITHET (idezett kifejezes): se OR / NOT / tagadas, se joker (*), se regex (~) idezojelen kivul. (A 7 napos, 24 oras szunetes
+    visszateszt tuzelesszama a szelesseget nem meri: egy `... OR *` szuro is par tuzelest adna.) -> None vagy az elutasitas oka."""
+    toks = str(query).split()
+    if any(t not in toks for t in str(item["filter"]).split()[:2]):
+        return "the filter must keep the host and the source of the group"
+    bare = re.sub(r'"(?:\\.|[^"\\])*"', '""', query)
+    if re.search(r"(?i)\b(or|not)\b", bare) or any(c in bare for c in "*~!") or re.search(r"(^|[\s(])-", bare):
+        return "the filter may only narrow the group (no OR / NOT / negation / wildcard / regex outside quoted phrases)"
+    return None
+
+
 def check_coverage_query(query, backtest=None):
     """A modell javasolta szuro ellenorzese. -> (None, backtest-eredmeny) vagy (az elutasitas oka, None)."""
     err = detectors.check_query(query)
@@ -409,6 +393,7 @@ _DANGER_LEVELS = {"err", "error", "crit", "critical", "alert", "emerg", "fatal"}
 _DANGER_RX = re.compile(r"(?i)\b(error|critical|fatal|fail(?:ed|ure|ing)?|panic|exception|traceback|denied|corrupt\w*|out of memory|oom|segfault|smart|unreachable|refused)\b")
 _CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1234", "FAILED SMART self-check. BACK UP DATA NOW!", "CRITICAL unhandled exception", "")
 _NESTED_Q = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
+_NESTED_ALT = re.compile(r"\([^()]*\|[^()]*\)\s*[+*{]")      # (a|aa)+ , (\w|\d)* : atfedo alternativak ismetlese (katasztrofalis visszalepes)
 
 
 _NUM_RX = re.compile(r"(?<!\\)(?:\\d\+|\[0-9\]\+)")
@@ -437,6 +422,8 @@ def check_noise_regex(rx, ref_templates, all_findings):
         return "the regex has no message text (it would silence a whole source, including its future errors)"
     if _NESTED_Q.search(rx):
         return "nested quantifiers are not allowed"
+    if _NESTED_ALT.search(rx):
+        return "a repeated alternation such as (a|b)+ is not allowed (catastrophic backtracking)"
     try:
         c = re.compile(rx)
     except re.error as e:
@@ -459,6 +446,73 @@ def check_noise_regex(rx, ref_templates, all_findings):
     if len(matched) > max(10, len(all_findings) // 4):
         return "matches too many open findings (too broad)"
     return None
+
+
+# ---------------------------------------------------------------- zaj-regex hatokor-visszateszt (elo naplo, 7 nap)
+
+NOISE_SCAN_HOURS = 168
+NOISE_SCAN_LIMIT = 3000            # sablon / forras (a novelty-lekerdezes korlatja is ennyi)
+NOISE_SCAN_MAX_COLLATERAL = 10     # ennyi kulonbozo, NEM hivatkozott sablonra illeszkedhet ugyanabbol a forrasbol
+
+
+def _ref_idents(ref_texts):
+    """A hivatkozott sablonok forras-azonositoi ('host | ident | sablon'): csak biztonsagos ertekek (a naplobol jonnek)."""
+    out = []
+    for t in ref_texts:
+        parts = str(t).split(" | ", 2)
+        if len(parts) == 3 and _SAFE_VAL.match(parts[1]) and parts[1] not in out:
+            out.append(parts[1])
+    return out[:3]
+
+
+def noise_scan(rx, ref_texts, hours=NOISE_SCAN_HOURS, now=None):
+    """A javasolt zaj-regex hatasa az ELO naplon: a hivatkozott forras(ok) (azonosito) elmult `hours` oranyi sablonjaira lefuttatva, ugyanazzal a
+    szoveggel es illesztessel, amit az elo zajlista hasznal. Megmutatja, mit nyel el meg a regex a hivatkozott leleteken tul.
+    -> None (nincs vizsgalhato forras) vagy {"hours", "lines", "templates", "hosts", "refs", "refs_matched", "collateral": [{"text", "hits", "level"}], "collateral_templates",
+    "collateral_lines", "truncated"}. A lekerdezes hibaja (OSError / ValueError / HTTPException) a hivonak megy tovabb."""
+    import novelty   # kesve: a novelty az aiops-ot importalja
+    idents = _ref_idents(ref_texts)
+    if not idents:
+        return None
+    c = re.compile(rx)
+    now = now or aiops.utcnow()
+    t_from = now - aiops.dt.timedelta(hours=hours)
+    vals = ", ".join('"' + i + '"' for i in idents)
+    rows, truncated = [], False
+    for name, flt, hf, idf, lf in novelty.SOURCES:
+        got, trunc = novelty._fetch((name, f"{flt} {idf}:in({vals})", hf, idf, lf), t_from, now, NOISE_SCAN_LIMIT, False, 60)
+        rows += got
+        truncated = truncated or trunc
+    refset = {str(t) for t in ref_texts}
+    matched = [r for r in rows if _tmatch(c, f"{r['host']} | {r['ident']} | {r['tmpl']}")]
+    coll = sorted((r for r in matched if f"{r['host']} | {r['ident']} | {r['tmpl']}" not in refset), key=lambda r: -r["hits"])
+    return {"hours": hours, "lines": sum(r["hits"] for r in matched), "templates": len(matched), "hosts": len({r["host"] for r in matched}),
+            "refs": len(ref_texts), "refs_matched": sum(1 for t in ref_texts if _tmatch(c, str(t))),
+            "collateral": [{"text": aiops.cut(f"{r['host']} | {r['ident']} | {r['tmpl']}", 200), "hits": r["hits"], "level": r["level"]} for r in coll[:5]],
+            "collateral_templates": len(coll), "collateral_lines": sum(r["hits"] for r in coll), "truncated": truncated}
+
+
+def noise_scan_verdict(sc):
+    """-> None (rendben / nincs adat) vagy az elutasitas oka: a regex az elo naplon is nyelne hibajellegu vagy tul sok mas sablont ugyanabbol a forrasbol."""
+    if not sc:
+        return None
+    for col in sc["collateral"]:
+        if str(col["level"]).lower() in _DANGER_LEVELS or _DANGER_RX.search(col["text"]):
+            return f"it also matches an error-like line of the same source in the last {sc['hours'] // 24} days (needs human review): {col['text'][:90]}"
+    if sc["collateral_templates"] > NOISE_SCAN_MAX_COLLATERAL:
+        return f"too broad: it also matches {sc['collateral_templates']} other templates of the same source in the last {sc['hours'] // 24} days"
+    return None
+
+
+def scan_text(sc):
+    """A javaslat megjegyzesebe szant, rovid osszegzes."""
+    if not sc:
+        return "7-day scan: not available"
+    t = (f"7-day scan: {sc['lines']} line(s) in {sc['templates']} template(s) on {sc['hosts']} host(s); covers {sc['refs_matched']}/{sc['refs']} referenced pattern(s); "
+         f"{sc['collateral_templates']} other template(s) of the same source ({sc['collateral_lines']} line(s))")
+    if sc["collateral"]:
+        t += f", e.g. {sc['collateral'][0]['text'][:100]}"
+    return t + (" [partial: row limit reached]" if sc.get("truncated") else "")
 
 
 # ---------------------------------------------------------------- modell-kimenet ellenorzese
@@ -501,9 +555,17 @@ def parse_report(content, task="overview", ctx=None):
             f["regex"] = normalize_noise_regex(f["regex"])
             f["refs"] = [r for r in f["refs"] if r in known]
             reason = "no valid pattern reference" if not f["refs"] else check_noise_regex(f["regex"], [known[r] for r in f["refs"]], ctx.get("all", []))
+            scan = None
+            if not reason and ctx.get("scan"):   # az elo naplo 7 napjan is: a hivatkozott forras mas soraira (pl. valodi interfesz) mit nyelne el
+                try:
+                    scan = ctx["scan"](f["regex"], [known[r] for r in f["refs"]])
+                except (OSError, ValueError, http.client.HTTPException):
+                    scan = None
+                reason = noise_scan_verdict(scan)
             if reason:
                 rejected.append({"task": task, "title": f["title"], "regex": f["regex"], "reason": reason})
                 continue
+            f["noise_scan"] = scan
             f["severity"] = "info"
         elif task == "coverage_gap":
             items = ctx.get("refs", {})
@@ -514,8 +576,9 @@ def parse_report(content, task="overview", ctx=None):
                 continue
             it = items[f["refs"][0]]
             query = f["query"].strip() or it["filter"]
-            if it["host"] not in query or it["ident"] not in query:
-                reason, bt = "the filter must keep the host and the source of the group", None
+            shape = check_coverage_shape(query, it)
+            if shape:
+                reason, bt = shape, None
             else:
                 reason, bt = check_coverage_query(query, ctx.get("backtest"))
             if reason:
@@ -688,7 +751,7 @@ def make_proposals(store, findings, now=None):
             continue
         bt = f.get("backtest")
         # a detektor-id validalt ([a-z0-9-], max 44 jel): a titokszuro a hosszat tokennek nezne, ezert CSAK a szabad szoveget szurjuk
-        what = f"noise regex {redact(f['regex'])}" if f["task"] == "noise" else f"detector {f['draft']['id']} (disabled): {redact(f['query'])}" + (f"; 7-day backtest {bt['firings']} firing(s), {bt['total']} line(s)" if bt else "")
+        what = f"noise regex {redact(f['regex'])}; {redact(scan_text(f.get('noise_scan')))}" if f["task"] == "noise" else f"detector {f['draft']['id']} (disabled): {redact(f['query'])}" + (f"; 7-day backtest {bt['firings']} firing(s), {bt['total']} line(s)" if bt else "")
         comment = f"[sup:{fp}] Supervisor {f['task']}: {redact(f['title'])}. {what}. {redact(f['detail'])}"
         pid = store.add_proposal(key, doc, PROPOSAL_AUTHOR, comment, store.revision_id(key))
         blocked.add(fp)
@@ -723,7 +786,7 @@ def _run_task(name, store, snap, model, now):
         inp = dict(snap, task="overview")
     elif name == "noise":
         inp, refs, allf = noise_input(store)
-        ctx = {"refs": refs, "all": allf}
+        ctx = {"refs": refs, "all": allf, "scan": noise_scan}
     elif name == "incident_review":
         try:
             inp, refs = incident_input(now, set(_load_seen(store)))

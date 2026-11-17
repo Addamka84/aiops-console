@@ -715,6 +715,87 @@ NOISE_RX_STORED = r"supervisor\.docker\.manager\] Exporting image (?:<N>|\d+)/ad
 SMART_Q = 'host:=homenas2 appname:=smartd "FAILED SMART self-check"'
 
 
+AV_REF = "homesrv | avahi-daemon | Withdrawing address record for <N>::cbf:<N> on veth<ID>."
+AV_RX_LOOSE = r"avahi-daemon.*(Withdrawing|Registering) address record.*"          # a #19 alakja: a valodi interfesz soraira is illeszkedik
+AV_RX_STRICT = r"avahi-daemon.*Withdrawing address record for .* on veth"
+
+
+def av_row(msg, hits, host="homesrv", ident="avahi-daemon", sev="info"):
+    return {"host": host, "appname": ident, "severity": sev, "_msg": msg, "hits": str(hits)}
+
+
+class NoiseScanTests(Base):
+    """alpha.14: a zaj-regex az elo naplo 7 napjan is lefut (hatokor-visszateszt), nem csak a hivatkozott leleteken."""
+
+    def vl(self, rows):
+        seen = []
+
+        def q(query, timeout=None):
+            seen.append(query)
+            return [dict(r) for r in rows] if "pipeline:syslog" in query else []
+        aiops.vl_query = q
+        return seen
+
+    def test_scan_counts_lines_and_shows_collateral(self):
+        queries = self.vl([av_row("Withdrawing address record for <N>::cbf:<N> on veth1a2b3c4.", 10),
+                           av_row("Withdrawing address record for <N>.<N>.<N>.<N> on eth<N>.", 2)])
+        sc = supervisor.noise_scan(AV_RX_LOOSE, [AV_REF])
+        self.assertEqual((sc["lines"], sc["templates"], sc["hosts"], sc["refs"], sc["refs_matched"]), (12, 2, 1, 1, 1))
+        self.assertEqual((sc["collateral_templates"], sc["collateral_lines"]), (1, 2))
+        self.assertIn("eth<N>", sc["collateral"][0]["text"])                  # a valodi interfesz sora latszik: ezt kell az embernek latnia
+        self.assertIsNone(supervisor.noise_scan_verdict(sc))                   # info szintu: nem utasitjuk el, de a szamok a megjegyzesbe kerulnek
+        self.assertIn("covers 1/1", supervisor.scan_text(sc))
+        self.assertIn("eth<N>", supervisor.scan_text(sc))
+        self.assertTrue(all('appname:in("avahi-daemon")' in q for q in queries if "pipeline:syslog" in q))   # csak a hivatkozott forrasra kerdez
+
+    def test_strict_regex_has_no_collateral(self):
+        self.vl([av_row("Withdrawing address record for <N>::cbf:<N> on veth1a2b3c4.", 10),
+                 av_row("Withdrawing address record for <N>.<N>.<N>.<N> on eth<N>.", 2)])
+        sc = supervisor.noise_scan(AV_RX_STRICT, [AV_REF])
+        self.assertEqual((sc["lines"], sc["collateral_templates"]), (10, 0))
+        self.assertNotIn("other template(s) of the same source (0 line(s)), e.g.", supervisor.scan_text(sc))
+
+    def test_error_like_collateral_is_rejected(self):
+        self.vl([av_row("Withdrawing address record for <N>::cbf:<N> on veth1a2b3c4.", 10),
+                 av_row("Withdrawing address record failed: interface eth<N> is down", 1)])
+        sc = supervisor.noise_scan(r"avahi-daemon.*Withdrawing address record", [AV_REF])
+        self.assertIn("error-like", supervisor.noise_scan_verdict(sc))
+
+    def test_too_many_other_templates_is_too_broad(self):
+        rows = [av_row("Withdrawing address record for <N>::cbf:<N> on veth1a2b3c4.", 10)] + \
+               [av_row(f"Withdrawing address record variant{i} on iface{i}x.", 1) for i in range(supervisor.NOISE_SCAN_MAX_COLLATERAL + 1)]
+        self.vl(rows)
+        sc = supervisor.noise_scan(r"avahi-daemon.*Withdrawing address record", [AV_REF])
+        self.assertIn("too broad", supervisor.noise_scan_verdict(sc))
+
+    def test_unsafe_source_identifier_is_not_queried(self):
+        queries = self.vl([])
+        self.assertIsNone(supervisor.noise_scan(AV_RX_STRICT, ['homesrv | evil") | delete | Withdrawing address record for <N> on veth<ID>.']))
+        self.assertEqual(queries, [])                                          # a naplobol jovo azonosito nem kerul a szurobe
+        self.assertIsNone(supervisor.noise_scan_verdict(None))
+        self.assertEqual(supervisor.scan_text(None), "7-day scan: not available")
+
+    def test_parse_report_rejects_on_scan_verdict_and_keeps_the_numbers(self):
+        ctx = {"refs": {"n1": AV_REF}, "all": [("info", AV_REF)]}
+        raw = lambda rx: json.dumps({"summary": "", "findings": [{"task": "noise", "severity": "info", "title": "t", "detail": "d", "refs": ["n1"], "regex": rx}]})
+        bad = {"hours": 168, "collateral": [{"text": "homesrv | avahi-daemon | Withdrawing address record failed", "hits": 1, "level": "info"}], "collateral_templates": 1}
+        part = supervisor.parse_report(raw(AV_RX_STRICT), "noise", dict(ctx, scan=lambda rx, refs: bad))
+        self.assertEqual(part["findings"], [])
+        self.assertIn("error-like", part["rejected"][0]["reason"])
+        good = {"hours": 168, "lines": 10, "templates": 1, "hosts": 1, "refs": 1, "refs_matched": 1, "collateral": [], "collateral_templates": 0, "collateral_lines": 0, "truncated": False}
+        part = supervisor.parse_report(raw(AV_RX_STRICT), "noise", dict(ctx, scan=lambda rx, refs: good))
+        self.assertEqual(part["findings"][0]["noise_scan"], good)
+
+    def test_scan_failure_does_not_block_the_suggestion(self):
+        def boom(rx, refs):
+            raise OSError("victorialogs down")
+        ctx = {"refs": {"n1": AV_REF}, "all": [("info", AV_REF)], "scan": boom}
+        raw = json.dumps({"summary": "", "findings": [{"task": "noise", "severity": "info", "title": "t", "detail": "d", "refs": ["n1"], "regex": AV_RX_STRICT}]})
+        part = supervisor.parse_report(raw, "noise", ctx)
+        self.assertEqual(len(part["findings"]), 1)
+        self.assertIsNone(part["findings"][0]["noise_scan"])                   # a human jovahagyas ugyis kell: nincs szamadat, de nincs elutasitas sem
+
+
 class ProposeTests(CoverageBase):
     def setUp(self):
         super().setUp()
@@ -822,6 +903,29 @@ class ProposeTests(CoverageBase):
 
     def finding_for(self, ref, query):
         return {"task": "coverage_gap", "severity": "medium", "title": "Timeouts", "detail": "10 lines", "refs": [ref], "regex": "", "query": query}
+
+    def test_noise_proposal_comment_carries_the_live_scan(self):
+        # alpha.14: az ember a javaslat megjegyzesebol latja a regex elo hatokorét (sorok, sablonok, nem hivatkozott mas sablonok)
+        orig = supervisor.noise_scan
+        supervisor.noise_scan = lambda rx, refs, **k: {"hours": 168, "lines": 12, "templates": 2, "hosts": 1, "refs": 1, "refs_matched": 1,
+                                                       "collateral": [{"text": "homesrv | avahi-daemon | on eth<N>.", "hits": 2, "level": "info"}],
+                                                       "collateral_templates": 1, "collateral_lines": 2, "truncated": False}
+        try:
+            self.go(gap=False)
+        finally:
+            supervisor.noise_scan = orig
+        comment = self.mine()[0]["comment"]
+        self.assertIn("7-day scan: 12 line(s) in 2 template(s) on 1 host(s); covers 1/1 referenced", comment)
+        self.assertIn("e.g. homesrv | avahi-daemon | on eth<N>.", comment)
+
+    def test_noise_proposal_without_scan_says_so(self):
+        orig = supervisor.noise_scan
+        supervisor.noise_scan = lambda rx, refs, **k: (_ for _ in ()).throw(OSError("down"))
+        try:
+            self.go(gap=False)
+        finally:
+            supervisor.noise_scan = orig
+        self.assertIn("7-day scan: not available", self.mine()[0]["comment"])
 
     def test_too_rare_filters_are_not_filed(self):
         self.bt_result = {"hours": 168, "firings": 1, "total": 2}

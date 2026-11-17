@@ -325,6 +325,64 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((r_h.status_code, r_h.json()["ok"], r_h.json()["version"]), (200, True, aiops.__version__))
         self.assertIn("last_digest", self.c.get("/last").json())
 
+    # ---- alpha.14: biztonsagi javitasok (audit)
+    def test_non_ascii_authorization_is_401_not_500(self):
+        r = self.c.get("/api/v1/status", headers={"Authorization": "Bearer ékezetes-token".encode("utf-8")})
+        self.assertEqual(r.status_code, 401)
+
+    def test_failed_attempts_are_limited_but_valid_tokens_still_work(self):
+        for i in range(console.AUTH_FAIL_LIMIT):
+            self.assertEqual(self.c.get("/api/v1/status", headers={"Authorization": f"Bearer bad{i}"}).status_code, 401)
+        r = self.c.get("/api/v1/status", headers={"Authorization": "Bearer bad-more"})
+        self.assertEqual((r.status_code, r.headers.get("retry-after")), (429, "60"))
+        self.assertEqual(self.c.get("/api/v1/status", headers=self.R).status_code, 200)    # a helyes token nem zarodik ki
+
+    def test_open_last_endpoint_has_no_log_content(self):
+        saved = dict(aiops.STATUS)
+        aiops.STATUS["last_incident"] = {"kind": "incident", "model": "m", "endpoint": "http://10.9.9.9:11434", "window": "w", "all_clear": False,
+                                         "summary": "secret summary", "issues": [{"title": "t", "evidence": "token=abc", "hosts": ["homesrv"]}]}
+        try:
+            j = self.c.get("/last").json()
+        finally:
+            aiops.STATUS.clear()
+            aiops.STATUS.update(saved)
+        self.assertEqual(j["last_incident"], {"kind": "incident", "window": "w", "all_clear": False, "issues": 1})
+        self.assertNotIn("10.9.9.9", json.dumps(j))
+        self.assertNotIn("secret", json.dumps(j))
+
+    def test_oversized_and_overlong_requests_are_refused(self):
+        big = {"key": "known", "comment": "x", "content": {"noise": ["x" * (console.MAX_BODY + 10)]}}
+        self.assertEqual(self.c.post("/api/v1/proposals", json=big, headers=self.R).status_code, 413)
+        long_comment = {"key": "known", "comment": "c" * 1001, "patch": {"add_noise": [r"\| something \|"]}}
+        self.assertEqual(self.c.post("/api/v1/proposals", json=long_comment, headers=self.R).status_code, 422)
+
+    def test_pending_proposals_per_actor_are_capped(self):
+        old = console.MAX_PENDING_PER_ACTOR
+        console.MAX_PENDING_PER_ACTOR = 2
+        try:
+            codes = [self.c.post("/api/v1/proposals", json={"key": "known", "comment": "c", "patch": {"add_noise": [rf"\| cap-test-{i} \|"]}}, headers=self.R).status_code
+                     for i in range(3)]
+        finally:
+            console.MAX_PENDING_PER_ACTOR = old
+        self.assertEqual(codes, [200, 200, 429])
+
+    def test_api_responses_are_not_cacheable_and_nosniff(self):
+        r = self.c.get("/api/v1/status", headers=self.R)
+        self.assertEqual((r.headers.get("cache-control"), r.headers.get("x-content-type-options")), ("no-store", "nosniff"))
+
+    def test_victorialogs_errors_do_not_leak_the_internal_address(self):
+        orig = aiops.log_volume
+
+        def boom(*a, **k):
+            raise OSError("connect to 10.1.2.3:9428 refused")
+        aiops.log_volume = boom
+        try:
+            r = self.c.get("/api/v1/stats/volume?hours=6", headers=self.R)
+        finally:
+            aiops.log_volume = orig
+        self.assertEqual(r.status_code, 502)
+        self.assertNotIn("10.1.2.3", r.text)
+
     def test_novelty_endpoints(self):
         self.assertEqual(self.c.get("/api/v1/novelty").status_code, 401)
         st = self.rt.store

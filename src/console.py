@@ -5,6 +5,7 @@ Szerepkorok (Bearer token, kornyezeti valtozokbol; a tokenek nem kerulnek konfig
 - admin (CONSOLE_ADMIN_TOKEN): minden, kozvetlen iras, javaslat jovahagyasa, feladatok inditasa, audit
 Token nelkul (egyik sincs beallitva) a vedett vegpontok 503-at adnak.
 """
+import collections
 import difflib
 import hmac
 import json
@@ -12,8 +13,8 @@ import os
 import re
 import time
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 import aiops
 import detectors
@@ -25,6 +26,9 @@ import topology
 from store import StoreError
 
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
+MAX_BODY = 262144          # a kerestest legfeljebb ennyi bajt (a legnagyobb dokumentum, a topologia, ennel joval kisebb)
+AUTH_FAIL_LIMIT = 10       # hibas tokenes proba / perc / kliens-cim: efelett 429 (a helyes tokenes keres tovabbra is atmegy)
+MAX_PENDING_PER_ACTOR = 100  # egy szereplo legfeljebb ennyi fuggo javaslatot hagyhat
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 
@@ -36,12 +40,12 @@ class Actor:
 
 class ConfigPut(BaseModel):
     content: dict
-    comment: str = ""
+    comment: str = Field("", max_length=1000)
 
 
 class ProposalIn(BaseModel):
-    key: str
-    comment: str
+    key: str = Field(max_length=40)
+    comment: str = Field(max_length=1000)
     content: dict | None = None
     patch: dict | None = None
 
@@ -95,19 +99,38 @@ def create_app(rt, tokens=None):
     store = rt.store
     app = FastAPI(title="aiops-console", version="1.0", description="Configuration and control API of the aiops service.")
 
+    for name_, tok_ in tokens.items():
+        if tok_ and len(tok_) < 32:
+            aiops.log(f"konzol: a(z) {name_} token rovid ({len(tok_)} jel): legalabb 32 veletlen jelet hasznalj", key=("console_short_token", name_))
+    fails = collections.defaultdict(collections.deque)   # kliens-cim -> a hibas probak ideje (monoton, mp)
+
+    def failure(ip):
+        now = time.monotonic()
+        q = fails[ip]
+        while q and now - q[0] > 60:
+            q.popleft()
+        q.append(now)
+        if len(fails) > 1000:   # a tar ne nohessen korlatlanul
+            for k in [k for k, v in fails.items() if not v or now - v[-1] > 60]:
+                fails.pop(k, None)
+        return len(q) > AUTH_FAIL_LIMIT
+
     def authed(need):
-        def dep(authorization: str | None = Header(None), x_actor: str | None = Header(None)):
+        def dep(request: Request, authorization: str | None = Header(None), x_actor: str | None = Header(None)):
             if not (tokens.get("read") or tokens.get("admin")):
                 raise HTTPException(503, "no API tokens configured (set CONSOLE_READ_TOKEN / CONSOLE_ADMIN_TOKEN)")
             got = (authorization or "")[7:].strip() if (authorization or "").lower().startswith("bearer ") else ""
+            gb = got.encode("utf-8", "replace")      # a compare_digest nem-ASCII str-re TypeError-t dobna (500)
             role = None
             if got:
-                if tokens.get("admin") and hmac.compare_digest(got, tokens["admin"]):
+                if tokens.get("admin") and hmac.compare_digest(gb, tokens["admin"].encode("utf-8", "replace")):
                     role = "admin"
-                elif tokens.get("read") and hmac.compare_digest(got, tokens["read"]):
+                elif tokens.get("read") and hmac.compare_digest(gb, tokens["read"].encode("utf-8", "replace")):
                     role = "read"
             if role is None:
-                time.sleep(0.3)  # tompiti a talalgatast
+                # nincs alvas (a szinkron fuggoseg a szalkészletben futna, igy a hibas probak kimerithetnek): kliensenkenti korlat
+                if failure(request.client.host if request.client else "-"):
+                    raise HTTPException(429, "too many failed attempts", headers={"Retry-After": "60"})
                 raise HTTPException(401, "missing or invalid token", headers={"WWW-Authenticate": "Bearer"})
             if need == "admin" and role != "admin":
                 raise HTTPException(403, "admin token required")
@@ -115,6 +138,28 @@ def create_app(rt, tokens=None):
         return dep
 
     read, admin = authed("read"), authed("admin")
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            cl = request.headers.get("content-length")
+            if cl is None and request.headers.get("transfer-encoding"):
+                return Response('{"detail":"chunked bodies are not accepted"}', 411, media_type="application/json")
+            try:
+                too_big = cl is not None and int(cl) > MAX_BODY
+            except ValueError:
+                too_big = True
+            if too_big:
+                return Response('{"detail":"request body too large"}', 413, media_type="application/json")
+        resp = await call_next(request)
+        if request.url.path.startswith("/api/") or request.url.path == "/last":
+            resp.headers["X-Content-Type-Options"] = "nosniff"
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def vl_down(e):
+        aiops.log(f"konzol: VictoriaLogs hiba: {type(e).__name__}: {e}", key="console_vl")
+        return "VictoriaLogs query failed (details in the service log)"
 
     def check_key(key):
         if key not in runtime.KEYS:
@@ -152,9 +197,17 @@ def create_app(rt, tokens=None):
             raise HTTPException(404, "not found")
         return ui_file(name)
 
+    def brief(r):
+        """A nyitott /last csak a metaadatot adja (nem a naplotartalmat, a hosztokat, a belso vegpontot): a reszletek a tokenes /api/v1/status-ban vannak."""
+        if not isinstance(r, dict):
+            return None
+        out = {k: r[k] for k in ("kind", "window", "all_clear") if k in r}
+        out["issues"] = len(r["issues"]) if isinstance(r.get("issues"), list) else 0
+        return out
+
     @app.get("/last", include_in_schema=False)
     def last():
-        return {"last_digest": aiops.STATUS.get("last_digest"), "last_incident": aiops.STATUS.get("last_incident")}
+        return {"last_digest": brief(aiops.STATUS.get("last_digest")), "last_incident": brief(aiops.STATUS.get("last_incident"))}
 
     @app.get("/api/v1/whoami")
     def whoami(who: Actor = Depends(read)):
@@ -255,7 +308,7 @@ def create_app(rt, tokens=None):
         try:
             raw = rt.raw_rows(body.hours)
         except (OSError, ValueError) as e:
-            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+            raise HTTPException(502, vl_down(e))
         res = aiops.analyze_known(aiops.Known(data=doc), raw)
         base = aiops.analyze_known(aiops.Known(data=cur), raw)
         res["baseline"] = {"noise_patterns": base["noise_patterns"], "noise_lines": base["noise_lines"],
@@ -292,7 +345,7 @@ def create_app(rt, tokens=None):
             try:
                 seen = aiops.log_sources(hours)
             except (OSError, ValueError) as e:
-                raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+                raise HTTPException(502, vl_down(e))
             cov_cache[hours] = (time.monotonic(), seen)
         return dict(topology.coverage(topo, seen), hours=hours, assets=len(topo.assets), seen=len(seen))
 
@@ -310,7 +363,7 @@ def create_app(rt, tokens=None):
         except ValueError as e:
             raise HTTPException(422, {"errors": [str(e)]})
         except OSError as e:
-            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+            raise HTTPException(502, vl_down(e))
 
     @app.get("/api/v1/detectors/status")
     def detectors_status(_: Actor = Depends(read)):
@@ -346,6 +399,8 @@ def create_app(rt, tokens=None):
         check_key(body.key)
         if (body.content is None) == (body.patch is None):
             raise HTTPException(422, {"errors": ["give exactly one of content or patch"]})
+        if sum(1 for p in store.proposals("pending", 1000) if p["author"] == who.name) >= MAX_PENDING_PER_ACTOR:
+            raise HTTPException(429, f"too many pending proposals from {who.name} (limit {MAX_PENDING_PER_ACTOR})")
         cur = (store.current(body.key) or {"content": {}})["content"]
         try:
             if body.content is not None:
@@ -424,7 +479,7 @@ def create_app(rt, tokens=None):
         except ValueError as e:
             raise HTTPException(422, {"errors": [str(e)]})
         except OSError as e:
-            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+            raise HTTPException(502, vl_down(e))
         vol_cache[key] = (time.monotonic(), res)
         return res
 
@@ -437,7 +492,7 @@ def create_app(rt, tokens=None):
         try:
             rows = aiops.vl_query(f"_time:90d pipeline:ai kind:{kinds} | sort by (_time desc) | limit {int(limit)}")
         except (OSError, ValueError) as e:
-            raise HTTPException(502, f"VictoriaLogs query failed: {e}")
+            raise HTTPException(502, vl_down(e))
         out = []
         for r in rows:
             try:

@@ -38,6 +38,8 @@ def check_query(q):
     bare = re.sub(r'"(?:\\.|[^"\\])*"', '""', q)
     if '"' in bare.replace('""', ""):
         return "unbalanced quotes in the query"
+    if "'" in bare or "`" in bare:   # a LogsQL a '...' es a `...` szoveget is idezojelnek ismeri: egy ilyen mogott a "bare" ellenorzes nem latna a csovet
+        return "single quotes and backticks are not allowed outside double-quoted text"
     if "|" in bare:
         return "query must be a filter only (no pipes outside quotes: the grouping and counting are added by the detector)"
     if ";" in bare:

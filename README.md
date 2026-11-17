@@ -172,3 +172,10 @@ like any other change; the Proposals page shows "will merge" / "conflict" and th
 - `coverage_gap` skips a group when **any** existing detector filter (enabled or disabled) names both its host and its source: the operator already has a decision pending or made for it.
 - `incident_review` remembers the incident ids it has reviewed (last 300) and does not send them to the model again, although the 48 h look-back window still contains them.
 - The proposal comment keeps the (validated) detector id readable; only the free text (title, detail, regex, filter) goes through the secret filter.
+
+### Noise-regex scope backtest and security hardening (v2.0.0-alpha.14)
+- Before a noise suggestion is filed, its regex is run over the last 7 days of the referenced source(s) (same text and matching as the live noise list). The proposal comment shows lines / templates / hosts, how many referenced patterns it covers, and the other templates of the same source it would also silence. It is rejected when it would also silence an error-like line or more than 10 other templates.
+- Regexes in the `known` document are probed in a separate process with a time limit before they are accepted (catastrophic-backtracking guard, `regex_guard.py`).
+- The secret filter (`redact.py`) now also covers the triage path (model input and output); new shapes: JWT, AWS key ids, `user:password@` in URLs, game-server commands.
+- API: the unauthenticated `/last` returns metadata only; failed-token attempts are limited per client (429 after 10/min); request bodies are capped at 256 KB; at most 100 pending proposals per actor; API responses are `no-store` / `nosniff`; upstream error details stay in the service log. Use tokens of at least 32 random characters.
+- Details and the open items: `docs/aiops-biztonsagi-audit.md` in the private repository.

@@ -955,6 +955,7 @@ async function pageSupervisor() {
         h('td', { class: 'small' }, f.detail, f.regex ? h('div', {}, 'Suggested noise regex: ', h('code', {}, f.regex)) : null,
           f.query ? h('div', {}, 'Suggested filter: ', h('code', {}, f.query)) : null,
           f.backtest ? h('div', { class: 'muted' }, 'Backtest ' + (f.backtest.hours / 24) + ' d: ' + f.backtest.firings + ' firing(s), ' + f.backtest.total + ' matching line(s)') : null,
+          f.noise_scan ? h('div', { class: 'muted' }, '7-day scan: ' + f.noise_scan.lines + ' line(s) in ' + f.noise_scan.templates + ' template(s); covers ' + f.noise_scan.refs_matched + '/' + f.noise_scan.refs + ' referenced; ' + f.noise_scan.collateral_templates + ' other template(s) of the same source' + (f.noise_scan.collateral && f.noise_scan.collateral.length ? ' (e.g. ' + f.noise_scan.collateral[0].text + ')' : '')) : null,
           f.draft ? h('details', {}, h('summary', { class: 'muted' }, 'Detector draft (disabled, not applied)'), h('pre', { class: 'diff' }, JSON.stringify(f.draft, null, 1))) : null,
           f.refs && f.refs.length ? h('div', { class: 'muted' }, 'refs: ' + f.refs.join(', ')) : null))))) : null,
     (r.report.proposals || []).length ? h('div', { class: 'note' }, 'Filed for approval: ', (r.report.proposals).map((p, i) => [i ? ', ' : '', h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('proposals'); } }, '#' + p.id), ' (' + p.key + ')'])) : null,
