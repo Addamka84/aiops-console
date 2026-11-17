@@ -392,6 +392,7 @@ def detector_draft(item, finding, query):
 
 # ---------------------------------------------------------------- zaj-javaslat vedelmei (determinisztikus; a modellnek nem hiszunk)
 
+MIN_NOISE_REGEX = 18                # ennel rovidebb regex (pl. "GET /health") mas szolgaltatasok soraira is illeszkedne
 _DANGER_LEVELS = {"err", "error", "crit", "critical", "alert", "emerg", "fatal"}
 _DANGER_RX = re.compile(r"(?i)\b(error|critical|fatal|fail(?:ed|ure|ing)?|panic|exception|traceback|denied|corrupt\w*|out of memory|oom|segfault|smart|unreachable|refused)\b")
 _CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1234", "FAILED SMART self-check. BACK UP DATA NOW!", "CRITICAL unhandled exception", "")
@@ -407,8 +408,10 @@ def _tmatch(c, template):
 def check_noise_regex(rx, ref_templates, all_findings):
     """A javasolt zaj-regex ellenorzese. -> None (rendben) vagy az elutasitas oka.
     Nem takarhat el hibajellegu mintat, nem lehet tul szeles, illeszkednie kell a hivatkozott sablonok legalabb egyikere."""
-    if not isinstance(rx, str) or not 8 <= len(rx) <= 200:
-        return "regex length must be 8..200 characters"
+    if not isinstance(rx, str) or not MIN_NOISE_REGEX <= len(rx) <= 200:
+        return f"regex length must be {MIN_NOISE_REGEX}..200 characters (a short phrase such as GET /health would silence other services too)"
+    if not re.search(r"\s|\\s", rx):
+        return "the regex has no message text (it would silence a whole source, including its future errors)"
     if _NESTED_Q.search(rx):
         return "nested quantifiers are not allowed"
     try:

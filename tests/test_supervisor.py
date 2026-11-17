@@ -318,6 +318,8 @@ class NoiseTests(Base):
         good = r"supervisor\.docker\.manager\] Exporting image"
         cases = {
             "too short": ([self.ids[EXPORT]], r"Export"),
+            "generic short phrase": ([self.ids[EXPORT]], r"Exporting image"),
+            "source only, no message text": ([self.ids[EXPORT]], r"supervisor\.docker\.manager\]Exporting\.image\.addon"),
             "match-all": ([self.ids[EXPORT]], r".*.*.*.*.*.*.*.*"),
             "nested quantifier": ([self.ids[EXPORT]], r"(Exporting+)+ image .*"),
             "invalid": ([self.ids[EXPORT]], r"Exporting image ((("),
@@ -329,12 +331,14 @@ class NoiseTests(Base):
             "short alternative": ([self.ids[EXPORT]], r"Exporting image .* to /data|GET /health"),
             "short alternative after an escaped bracket": ([self.ids[EXPORT]], r"\[supervisor\.docker\.manager\] Exporting image|GET /health"),
         }
-        m = self.model_returning([self.f(refs, rx, title=name) for name, (refs, rx) in cases.items()])
-        supervisor.run_once(self.store, model=m)
-        r = self.last()
-        self.assertEqual(r["findings"], [], r["rejected"])
-        self.assertEqual({x["title"] for x in r["rejected"]}, set(cases))
-        self.assertTrue(all(x["reason"] for x in r["rejected"]))
+        names = list(cases)
+        for part in (names[:len(names) // 2], names[len(names) // 2:]):   # a jelentes legfeljebb MAX_FINDINGS elutasitast orzi
+            m = self.model_returning([self.f(cases[n][0], cases[n][1], title=n) for n in part])
+            supervisor.run_once(self.store, model=m)
+            r = self.last()
+            self.assertEqual(r["findings"], [], r["rejected"])
+            self.assertEqual({x["title"] for x in r["rejected"]}, set(part))
+            self.assertTrue(all(x["reason"] for x in r["rejected"]))
 
     def test_digit_classes_match_the_number_placeholder(self):
         # a sablonban a szamok <N>: a nyers sorokra irt \d+ regex ettol meg ervenyes (alpha.6-ban tevesen elutasitottuk)
