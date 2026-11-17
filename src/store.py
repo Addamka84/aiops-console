@@ -8,6 +8,8 @@ import sqlite3
 import threading
 import time
 
+from merge import merge3
+
 KEEP_REVISIONS = 200
 
 
@@ -130,17 +132,40 @@ class Store:
             raise StoreError(f"no such proposal: {pid}")
         return self._prop(r)
 
-    def decide(self, pid, approve, actor, force=False):
-        """Elfogad (-> uj konfig-verzio) vagy elutasit. Elavult javaslat (kozben valtozott a konfig) csak force-szal fogadhato el."""
+    def merge_preview(self, p):
+        """Elavult (kozben valtozott a konfig) fuggo javaslat osszefesulese az aktualis dokumentumra (merge.py).
+        -> {"stale": bool, "merged": dokumentum | None, "conflicts": [utak]}; nem elavultnal merged = a javaslat tartalma."""
+        if self.revision_id(p["key"]) == p["base_rev"]:
+            return {"stale": False, "merged": p["content"], "conflicts": []}
+        try:
+            base = self.revision(p["key"], p["base_rev"])["content"] if p["base_rev"] else {}
+        except StoreError:
+            return {"stale": True, "merged": None, "conflicts": ["(base revision is gone)"]}
+        cur = (self.current(p["key"]) or {"content": {}})["content"]
+        merged, conflicts = merge3(base, cur, p["content"])
+        return {"stale": True, "merged": None if conflicts else merged, "conflicts": conflicts}
+
+    def decide(self, pid, approve, actor, force=False, validate=None):
+        """Elfogad (-> uj konfig-verzio) vagy elutasit. Elavult javaslat (kozben valtozott a konfig): haromutas osszefesules az aktualis
+        dokumentumra (a masik javaslat valtoztatasa nem vesz el); konfliktusnal csak force-szal fogadhato el (a javaslat tartalma felulir).
+        validate: opcionalis hivhato (kulcs, dokumentum) -> dokumentum, hibaja kivetel (az osszefesult eredmenyt ellenorzi)."""
         with self.lock:
             p = self.proposal(pid)
             if p["status"] != "pending":
                 raise StoreError(f"proposal {pid} is already {p['status']}")
             rid = None
             if approve:
-                if self.revision_id(p["key"]) != p["base_rev"] and not force:
-                    raise StoreError("stale: the configuration changed since this proposal was made (use force to apply anyway)")
-                rid = self.put(p["key"], p["content"], f"{p['author']} (approved by {actor})", f"proposal {pid}: {p['comment']}")
+                content, note = p["content"], ""
+                mp = self.merge_preview(p)
+                if mp["stale"]:
+                    if mp["merged"] is not None:
+                        content = validate(p["key"], mp["merged"]) if validate else mp["merged"]
+                        note = " [merged onto a newer revision]"
+                    elif not force:
+                        raise StoreError("stale: conflicting changes in " + ", ".join(mp["conflicts"][:5]) + " (use force to apply the proposal as written, overwriting)")
+                    else:
+                        note = " [forced over a newer revision]"
+                rid = self.put(p["key"], content, f"{p['author']} (approved by {actor}){note}", f"proposal {pid}: {p['comment']}")
             self.db.execute("UPDATE proposals SET status=?, decided_ts=?, decided_by=? WHERE id=?",
                             ("approved" if approve else "rejected", now_iso(), actor, pid))
             self._audit(actor, f"proposal.{'approve' if approve else 'reject'}", f"proposal {pid}")

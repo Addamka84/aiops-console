@@ -99,7 +99,7 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /config/{key}/revisions[/{id}]` (read), `POST /config/{key}/rollback/{id}` (admin) | history and rollback |
 | `POST /test/known` (read) | dry run of `{"patch": {...}}` or `{"content": {...}}` against the last `hours` of logs |
 | `POST /proposals` (read) | propose a change: `{"key":"known","comment":"...","patch":{"add_noise":["regex"]}}` |
-| `GET /proposals[/{id}]` (read), `POST /proposals/{id}/approve?force=` / `reject` (admin) | review (with diff); stale proposals need `force` |
+| `GET /proposals[/{id}]` (read), `POST /proposals/{id}/approve?force=` / `reject` (admin) | review (with diff). A proposal made on an older revision of the document is **merged** onto the current one when approved (`merge`: `clean`, the diff shows the merged result) ; real conflicts (`merge`: `conflict`, `conflicts` lists the paths) need `force` (the proposal then overwrites) |
 | `GET /stats/volume?hours=24&by=pipeline` (read) | log message counts per time bucket for a stacked chart; `hours` 6/24/72/168, `by` `pipeline`/`host` (60 s cache) |
 | `GET /stats/runs?kind=digest&limit=14` (read) | recent checks with their "what was reviewed" statistics (from the `pipeline:ai` events in VictoriaLogs) |
 | `GET /novelty?status=open&limit=100` (read) | new-pattern / rate-spike findings plus the detector state (baseline size, last scan, errors); `status` `open`/`dismissed`/`all` |
@@ -160,3 +160,10 @@ an accepted `noise` regex becomes a `known` proposal (`add_noise`), an accepted 
 Guards: no duplicates (a proposal with the same fingerprint that is pending, approved or rejected in the last 30 days is not filed again; a regex or detector id already in the configuration is skipped),
 quotas `SUPERVISOR_MAX_PROPOSALS_PER_RUN` (3) and `SUPERVISOR_MAX_PROPOSALS_PER_DAY` (10), at most 10 supervisor proposals pending at once, a failing proposal step never loses the report.
 Every filed proposal carries the evidence (title, backtest) in its comment and the run's audit entry counts them.
+
+### Proposals on an older revision (v2.0.0-alpha.10)
+A proposal stores the full document as it was when the proposal was made. If another proposal is approved first, the document moved on. Instead of refusing or overwriting,
+approving now does a **three-way merge** (`merge.py`): base (the revision the proposal was made on), current and proposed give "what did the proposal change", and that is applied to the current
+document: list items that were added or removed are added or removed (items with an `id`, e.g. detectors, are matched by id), dictionary keys recursively, a scalar is taken when the current value did
+not change from the base. Both sides changing the same scalar / the same `id` differently is a conflict and needs `force` (the proposal's own content then wins). The merged document is validated
+like any other change; the Proposals page shows "will merge" / "conflict" and the merged diff.

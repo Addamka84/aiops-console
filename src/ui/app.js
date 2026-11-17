@@ -925,12 +925,12 @@ async function pageProposals() {
       try { const x = await api('GET', '/api/v1/proposals/' + p.id); body.replaceChildren(diffEl(x.diff)); } catch (e) { body.textContent = e.message; }
     } }, h('summary', {}, 'Show changes'), body);
     return h('div', { class: 'panel' },
-      h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status), p.stale ? h('span', { class: 'badge b-stale', title: 'The configuration changed after this proposal was made' }, 'stale') : null,
+      h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status), p.stale ? h('span', { class: 'badge b-stale', title: p.merge === 'clean' ? 'The configuration changed after this proposal was made; approving merges it onto the newer revision' : 'The configuration changed in the same place: ' + (p.conflicts || []).join(', ') }, p.merge === 'clean' ? 'will merge' : 'conflict') : null,
         h('span', { class: 'muted small' }, p.author + ' · ' + fmtTime(p.ts) + (p.decided_by ? ' · ' + p.status + ' by ' + p.decided_by : ''))),
       h('p', {}, p.comment), det,
       p.status === 'pending' && isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
-        h('button', { class: 'btn primary', disabled: p.stale, onclick: () => decide(p.id, 'approve') }, 'Approve'),
-        p.stale ? h('button', { class: 'btn', onclick: () => confirm('Apply anyway? This overwrites newer changes.') && decide(p.id, 'approve', true) }, 'Approve anyway') : null,
+        h('button', { class: 'btn primary', disabled: p.stale && p.merge !== 'clean', onclick: () => decide(p.id, 'approve') }, p.stale && p.merge === 'clean' ? 'Approve (merge)' : 'Approve'),
+        p.stale && p.merge !== 'clean' ? h('button', { class: 'btn', onclick: () => confirm('Conflicting changes in ' + (p.conflicts || []).join(', ') + '. Apply the proposal as written? This overwrites the newer changes there.') && decide(p.id, 'approve', true) }, 'Approve anyway (overwrite)') : null,
         h('button', { class: 'btn danger', onclick: () => decide(p.id, 'reject') }, 'Reject')) : null);
   };
   renderShell([h('h2', {}, 'Proposals'),

@@ -370,8 +370,15 @@ def create_app(rt, tokens=None):
     def prop_view(p, with_diff=True):
         out = {k: p[k] for k in ("id", "ts", "author", "key", "comment", "status", "decided_ts", "decided_by", "base_rev")}
         out["stale"] = p["status"] == "pending" and store.revision_id(p["key"]) != p["base_rev"]
+        proposed = p["content"]
+        if out["stale"]:   # a konfig kozben valtozott: az osszefesult eredmeny (vagy a konfliktus) latszik, a jovahagyas ezt hajtja vegre
+            mp = store.merge_preview(p)
+            out["merge"] = "clean" if mp["merged"] is not None else "conflict"
+            out["conflicts"] = mp["conflicts"]
+            if mp["merged"] is not None:
+                proposed = mp["merged"]
         if with_diff:
-            out["diff"] = unified((store.current(p["key"]) or {"content": {}})["content"], p["content"])
+            out["diff"] = unified((store.current(p["key"]) or {"content": {}})["content"], proposed)
         return out
 
     @app.get("/api/v1/proposals")
@@ -388,8 +395,8 @@ def create_app(rt, tokens=None):
     @app.post("/api/v1/proposals/{pid}/approve")
     def approve(pid: int, force: bool = False, who: Actor = Depends(admin)):
         try:
-            rid = store.decide(pid, True, who.name, force=force)
-        except StoreError as e:
+            rid = store.decide(pid, True, who.name, force=force, validate=runtime.validate_doc)
+        except (StoreError, runtime.DocError) as e:
             fail(e)
         rt.changed()
         return {"status": "approved", "rev": rid}

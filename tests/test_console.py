@@ -80,20 +80,27 @@ class StoreTests(unittest.TestCase):
             self.s.decide(pid, True, "admin")  # mar eldontott
         self.assertTrue(any(a["action"] == "proposal.approve" for a in self.s.audit_list()))
 
-    def test_stale_proposal_needs_force_and_reject_changes_nothing(self):
-        self.s.put("known", {"noise": []}, "seed")
-        pid = self.s.add_proposal("known", {"noise": ["x"]}, "read", "x", self.s.revision_id("known"))
-        self.s.put("known", {"noise": ["other"]}, "admin")  # kozben valtozott
+    def test_stale_proposal_merges_cleanly_and_conflicts_need_force(self):
+        self.s.put("known", {"noise": [], "mode": "a"}, "seed")
+        pid = self.s.add_proposal("known", {"noise": ["x"], "mode": "a"}, "read", "x", self.s.revision_id("known"))
+        self.s.put("known", {"noise": ["other"], "mode": "a"}, "admin")  # kozben masik valtozas (nem utkozik)
+        self.s.decide(pid, True, "admin")                                  # osszefesules: ["other", "x"]
+        self.assertEqual(self.s.current("known")["content"], {"noise": ["other", "x"], "mode": "a"})
+        self.assertIn("[merged onto a newer revision]", self.s.current("known")["author"])
+        # valodi konfliktus: ugyanazt a skalart mindketten mashogy valtoztattak
+        p2 = self.s.add_proposal("known", {"noise": ["other", "x"], "mode": "b"}, "read", "b", self.s.revision_id("known"))
+        self.s.put("known", {"noise": ["other", "x"], "mode": "c"}, "admin")
         with self.assertRaises(StoreError) as cm:
-            self.s.decide(pid, True, "admin")
+            self.s.decide(p2, True, "admin")
         self.assertIn("stale", str(cm.exception))
-        self.assertEqual(self.s.current("known")["content"], {"noise": ["other"]})
-        self.s.decide(pid, True, "admin", force=True)
-        self.assertEqual(self.s.current("known")["content"], {"noise": ["x"]})
-        p2 = self.s.add_proposal("known", {"noise": ["y"]}, "read", "y", self.s.revision_id("known"))
-        self.s.decide(p2, False, "admin")
-        self.assertEqual(self.s.proposal(p2)["status"], "rejected")
-        self.assertEqual(self.s.current("known")["content"], {"noise": ["x"]})
+        self.assertIn("mode", str(cm.exception))
+        self.assertEqual(self.s.current("known")["content"]["mode"], "c")
+        self.s.decide(p2, True, "admin", force=True)                       # a javaslat sajat tartalma ir felul
+        self.assertEqual(self.s.current("known")["content"]["mode"], "b")
+        p3 = self.s.add_proposal("known", {"noise": ["y"]}, "read", "y", self.s.revision_id("known"))
+        self.s.decide(p3, False, "admin")
+        self.assertEqual(self.s.proposal(p3)["status"], "rejected")
+        self.assertEqual(self.s.current("known")["content"]["mode"], "b")
 
 
 class ValidationTests(unittest.TestCase):
@@ -516,9 +523,18 @@ class ApiTests(unittest.TestCase):
         doc = copy.deepcopy(FIXTURE)
         doc["noise"].append("bbb")
         self.c.put("/api/v1/config/known", json={"content": doc}, headers=self.A)  # ez elavitja
-        self.assertTrue(self.c.get(f"/api/v1/proposals/{p}", headers=self.R).json()["stale"])
-        self.assertEqual(self.c.post(f"/api/v1/proposals/{p}/approve", headers=self.A).status_code, 409)
-        self.assertEqual(self.c.post(f"/api/v1/proposals/{p}/reject", headers=self.A).status_code, 200)
+        v = self.c.get(f"/api/v1/proposals/{p}", headers=self.R).json()
+        self.assertTrue(v["stale"])
+        self.assertEqual(v["merge"], "clean")                       # masik lista-elem valtozott: osszefesulheto
+        self.assertIn("+  \"aaa\"", v["diff"])
+        self.assertIn('+  "bbb",', v["diff"])                        # a diff az osszefesult eredmeny: a masik valtoztatas nem vész el
+        ok = self.c.post(f"/api/v1/proposals/{p}/approve", headers=self.A)
+        self.assertEqual(ok.status_code, 200)
+        noise = self.c.get("/api/v1/config/known", headers=self.R).json()["content"]["noise"]
+        self.assertIn("aaa", noise)
+        self.assertIn("bbb", noise)
+        p2 = self.c.post("/api/v1/proposals", json={"key": "known", "comment": "a2", "patch": {"add_noise": ["ccc"]}}, headers=self.R).json()["id"]
+        self.assertEqual(self.c.post(f"/api/v1/proposals/{p2}/reject", headers=self.A).status_code, 200)
         for body in ({"key": "known", "comment": "x"},  # se content, se patch
                      {"key": "known", "comment": "x", "patch": {"add_noise": ["("]}},  # ervenytelen regex
                      {"key": "known", "comment": "x", "patch": {"remove_noise": ["no-such"]}},
