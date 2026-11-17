@@ -22,6 +22,7 @@ STATE = {"running": False}
 MAX_FINDINGS = 12
 MAX_TOTAL_FINDINGS = 30
 WINDOW_H = 12                     # az attekintett idoszak (ora)
+INCIDENT_WINDOW_H = 48              # az incidens-felulvizsgalat visszatekintese (ora): az incidensek ritkak
 TASKS = ("overview", "noise", "incident_review")   # 2. fazis; kesobb: coverage_gap, detector
 DEFAULT_TASKS = list(TASKS)
 STATUSES = ("ok", "partial", "budget", "error")
@@ -180,12 +181,15 @@ def rule_report(snap):
 class OpenAIModel:
     """OpenAI-kompatibilis /v1/chat/completions (vLLM, NIM, llama.cpp-szerver...). Kulon vegpont/modell/kulcs a triazs-modelltol."""
 
-    def __init__(self, url, model, key, timeout):
+    def __init__(self, url, model, key, timeout, max_out=4000, reasoning=""):
         self.url, self.name, self.key, self.timeout = url, model, key, timeout
+        self.max_out, self.reasoning = max_out, reasoning
 
     def complete(self, system, user):
-        base = {"model": self.name, "temperature": 0.1, "max_tokens": 1500,
+        base = {"model": self.name, "temperature": 0.1, "max_tokens": self.max_out,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if self.reasoning:   # gondolkodo modellek (pl. gpt-oss): a gondolkodas melysege; csak ha be van allitva (nem minden szerver ismeri)
+            base["reasoning_effort"] = self.reasoning
         schema_fmt = {"type": "json_schema", "json_schema": {"name": "supervisor_report", "schema": REPORT_SCHEMA, "strict": True}}
         headers = {"Authorization": "Bearer " + self.key} if self.key else {}
         for fmt in (schema_fmt, {"type": "json_object"}):
@@ -218,7 +222,8 @@ def make_model():
         return MockModel()
     if not aiops.CFG["SUPERVISOR_URL"] or not aiops.CFG["SUPERVISOR_MODEL"]:
         raise ModelError("SUPERVISOR_URL / SUPERVISOR_MODEL are not set")
-    return OpenAIModel(aiops.CFG["SUPERVISOR_URL"], aiops.CFG["SUPERVISOR_MODEL"], aiops.CFG["SUPERVISOR_KEY"], aiops.CFG["SUPERVISOR_TIMEOUT_S"])
+    return OpenAIModel(aiops.CFG["SUPERVISOR_URL"], aiops.CFG["SUPERVISOR_MODEL"], aiops.CFG["SUPERVISOR_KEY"], aiops.CFG["SUPERVISOR_TIMEOUT_S"],
+                       aiops.CFG["SUPERVISOR_MAX_OUT_TOKENS"], aiops.CFG["SUPERVISOR_REASONING"])
 
 
 
@@ -236,10 +241,10 @@ def noise_input(store):
 
 
 def incident_input(now=None):
-    """Az utolso WINDOW_H ora AI-incidensei (a VictoriaLogs pipeline:ai esemenyeibol). -> (bemenet, {ref})"""
+    """Az utolso INCIDENT_WINDOW_H ora AI-incidensei (a VictoriaLogs pipeline:ai esemenyeibol). -> (bemenet, {ref})"""
     n = max(1, min(20, aiops.CFG["SUPERVISOR_MAX_ITEMS"] // 4))
-    heads = aiops.vl_query(f"_time:{WINDOW_H}h pipeline:ai kind:incident | sort by (_time desc) | limit {n}", timeout=20)
-    issues = aiops.vl_query(f"_time:{WINDOW_H}h pipeline:ai kind:issue | sort by (_time desc) | limit 400", timeout=20)
+    heads = aiops.vl_query(f"_time:{INCIDENT_WINDOW_H}h pipeline:ai kind:incident | sort by (_time desc) | limit {n}", timeout=20)
+    issues = aiops.vl_query(f"_time:{INCIDENT_WINDOW_H}h pipeline:ai kind:issue | sort by (_time desc) | limit 400", timeout=20)
     by_parent = {}
     for i in issues:
         by_parent.setdefault(str(i.get("parent", "")), []).append({

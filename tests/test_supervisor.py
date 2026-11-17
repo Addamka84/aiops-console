@@ -247,6 +247,15 @@ class OpenAITests(Base):
         self.assertNotIn("k-123", json.dumps(run))
         self.assertEqual(run["report"]["findings"][0]["severity"], "low")
 
+    def test_output_limit_and_reasoning_effort_are_settings(self):
+        calls, _ = self.run_with()
+        self.assertEqual(calls[0][1]["max_tokens"], 4000)
+        self.assertNotIn("reasoning_effort", calls[0][1])           # alapbol nem kuldjuk (nem minden szerver ismeri)
+        aiops.CFG["SUPERVISOR_MAX_OUT_TOKENS"] = 9000
+        aiops.CFG["SUPERVISOR_REASONING"] = "low"
+        calls, _ = self.run_with()
+        self.assertEqual((calls[0][1]["max_tokens"], calls[0][1]["reasoning_effort"]), (9000, "low"))
+
     def test_schema_fallback(self):
         calls, run = self.run_with(reject_schema=True)
         self.assertEqual(run["status"], "ok")
@@ -383,6 +392,12 @@ class IncidentReviewTests(Base):
             return [dict(HEAD)] if "kind:incident" in q else [dict(ISSUE)] if "kind:issue" in q else []
         aiops.vl_query = vl
 
+    def test_incident_lookback_is_48h(self):
+        seen = []
+        aiops.vl_query = lambda q, timeout=None: (seen.append(q), [])[1]
+        supervisor.run_once(self.store, model=FakeModel())
+        self.assertTrue(any("_time:48h" in q and "kind:incident" in q for q in seen), seen)
+
     def test_mock_flags_ungrounded_hosts(self):
         supervisor.run_once(self.store)
         r = self.store.sup_runs()[0]["report"]
@@ -461,6 +476,13 @@ class SettingsTests(unittest.TestCase):
         for bad in ({"SUPERVISOR_MODE": "propose"}, {"SUPERVISOR_URL": "http://h:1/path"}, {"SUPERVISOR_INTERVAL_MIN": 1},
                     {"SUPERVISOR_API": "x"}, {"SUPERVISOR_KEY": "k"}):
             self.assertTrue(settings.validate(bad)[1], bad)
+
+    def test_output_settings(self):
+        ok, errs = settings.validate({"SUPERVISOR_MAX_OUT_TOKENS": 8000, "SUPERVISOR_REASONING": "low"})
+        self.assertEqual((errs, ok["SUPERVISOR_REASONING"]), ([], "low"))
+        self.assertEqual(settings.validate({"SUPERVISOR_REASONING": ""})[1], [])
+        self.assertTrue(settings.validate({"SUPERVISOR_REASONING": "max"})[1])
+        self.assertTrue(settings.validate({"SUPERVISOR_MAX_OUT_TOKENS": 100})[1])
 
     def test_tasks_setting(self):
         ok, errs = settings.validate({"SUPERVISOR_TASKS": "noise, overview,noise", "SUPERVISOR_MAX_ITEMS": 100})
