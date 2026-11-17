@@ -152,3 +152,11 @@ last 7 days (known noise is skipped; host and source values from logs are only u
 and proposes a LogsQL **filter**; deterministic guards check it (filter-only syntax, it must keep the group's host and source, a 7-day backtest on VictoriaLogs: it
 must match lines and would fire at most 14 times with a 24 h cooldown). Each accepted finding carries the backtest result and a **disabled detector draft** that is
 only shown, never applied. Mode `report` only; turning drafts into proposals is a later phase (admin approval stays).
+
+### Supervisor `propose` mode (v2.0.0-alpha.9)
+With `SUPERVISOR_MODE=propose` the supervisor also **files** its validated suggestions as ordinary proposals (author `supervisor`), never as direct changes:
+an accepted `noise` regex becomes a `known` proposal (`add_noise`), an accepted `coverage_gap` draft becomes a `detectors` proposal that adds the detector **disabled**
+(enabling it is a separate human step on the Detectors page). `incident_review` and `overview` never file anything. The admin approves or rejects each proposal on the Proposals page as usual.
+Guards: no duplicates (a proposal with the same fingerprint that is pending, approved or rejected in the last 30 days is not filed again; a regex or detector id already in the configuration is skipped),
+quotas `SUPERVISOR_MAX_PROPOSALS_PER_RUN` (3) and `SUPERVISOR_MAX_PROPOSALS_PER_DAY` (10), at most 10 supervisor proposals pending at once, a failing proposal step never loses the report.
+Every filed proposal carries the evidence (title, backtest) in its comment and the run's audit entry counts them.

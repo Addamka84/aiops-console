@@ -87,7 +87,7 @@ CFG = {
     "FLAP_WINDOW_H": _env_int("FLAP_WINDOW_H", 6),
     "FLAP_COOLDOWN_MIN": _env_int("FLAP_COOLDOWN_MIN", 180),
     # Auto AI Supervisor (supervisor.py): idoszakos, CSAK OLVASO ellenorzes kulon modellel. Alapbol ki; a kulcs CSAK kornyezeti valtozo.
-    "SUPERVISOR_MODE": os.environ.get("SUPERVISOR_MODE", "off"),                 # off | report
+    "SUPERVISOR_MODE": os.environ.get("SUPERVISOR_MODE", "off"),                 # off | report | propose
     "SUPERVISOR_INTERVAL_MIN": _env_int("SUPERVISOR_INTERVAL_MIN", 360),         # perc
     "SUPERVISOR_API": os.environ.get("SUPERVISOR_API", "openai"),                # openai | mock (a mock csak teszthez/bemutatohoz: determinisztikus)
     "SUPERVISOR_URL": os.environ.get("SUPERVISOR_URL", "").strip().rstrip("/"),  # a supervisor modell vegpontja (http(s)://host:port)
@@ -99,9 +99,11 @@ CFG = {
     "SUPERVISOR_TASKS": [t.strip() for t in os.environ.get("SUPERVISOR_TASKS", "overview,noise,incident_review,coverage_gap").split(",") if t.strip()],
     "SUPERVISOR_MAX_OUT_TOKENS": _env_int("SUPERVISOR_MAX_OUT_TOKENS", 4000),    # a modell kimenetenek felso hatara (gondolkodo modellnel a gondolkodas is beleszamit)
     "SUPERVISOR_REASONING": os.environ.get("SUPERVISOR_REASONING", "").strip(),  # "" | low | medium | high (reasoning_effort; ures = nem kuldjuk)
+    "SUPERVISOR_MAX_PROPOSALS_PER_RUN": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_RUN", 3),    # propose modban: egy futas legfeljebb ennyi javaslatot ad be
+    "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.8"
+__version__ = "2.0.0-alpha.9"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 

@@ -8,6 +8,7 @@ Elvek: (1) a naplo/riasztas szoveg ADAT, nem utasitas: a modell kimenete szerkez
 (4) 'off' modban nincs modellhivas; (5) a sajat szalan fut, a modell elerhetetlensege nem akasztja a triazst.
 A kulcs csak kornyezeti valtozo (SUPERVISOR_KEY), nem kerul beallitasba, jelentesbe, naploba.
 """
+import hashlib
 import http.client
 import json
 import re
@@ -576,6 +577,96 @@ def fit_input(obj, system):
     return text
 
 
+# ---------------------------------------------------------------- propose mod: ellenorzott javaslatok beadasa (a jovahagyas az emberre var)
+
+PROPOSAL_AUTHOR = "supervisor"
+REJECTED_COOLDOWN_DAYS = 30       # az elutasitott javaslatot ennyi napig nem adja be ujra
+MAX_PENDING = 10                  # a supervisor legfeljebb ennyi fuggo javaslatot hagy egyszerre
+_FP_RX = re.compile(r"\[sup:([0-9a-f]{10})\]")
+
+
+def _fingerprint(*parts):
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:10]
+
+
+def _parse_ts(s):
+    try:
+        return aiops.dt.datetime.strptime(str(s), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=aiops.dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def make_proposals(store, findings, now=None):
+    """Az ellenorzott talalatokbol javaslat (proposals): zaj-regex -> 'known', detektor-vazlat -> 'detectors'. Embernek kell jovahagynia;
+    a supervisor semmit nem alkalmaz. Dedup (ujrabeadas nincs: fuggo / jovahagyott / 30 napon belul elutasitott ugyanaz), kvota (futas, nap, fuggo).
+    -> (letrehozott [{id, key, title}], kihagyott [{title, reason}])"""
+    import runtime   # kesve: a runtime a settings-en at a supervisort is eleri
+    now = now or aiops.utcnow()
+    cfg = aiops.CFG
+    mine = [p for p in store.proposals(None, 500) if p["author"] == PROPOSAL_AUTHOR]
+    today = _day(now)
+    made_today = sum(1 for p in mine if str(p["ts"]).startswith(today))
+    pending = sum(1 for p in mine if p["status"] == "pending")
+    blocked = set()
+    for p in mine:
+        m = _FP_RX.search(p["comment"])
+        if not m:
+            continue
+        if p["status"] in ("pending", "approved"):
+            blocked.add(m.group(1))
+        elif p["status"] == "rejected":
+            t = _parse_ts(p.get("decided_ts"))
+            if t is None or (now - t).days < REJECTED_COOLDOWN_DAYS:
+                blocked.add(m.group(1))
+    # a coverage_gap (hianyzo riasztas) erosebb, mint a zaj-javaslat
+    cands = sorted((f for f in findings if f["task"] in ("coverage_gap", "noise")), key=lambda f: (f["task"] != "coverage_gap", aiops.SEVERITIES.index(f["severity"]) if f["severity"] in aiops.SEVERITIES else 9))
+    created, skipped = [], []
+    for f in cands:
+        title = f["title"][:120]
+        if len(created) >= cfg["SUPERVISOR_MAX_PROPOSALS_PER_RUN"]:
+            skipped.append({"title": title, "reason": "per-run proposal limit reached"})
+            continue
+        if made_today + len(created) >= cfg["SUPERVISOR_MAX_PROPOSALS_PER_DAY"]:
+            skipped.append({"title": title, "reason": "daily proposal limit reached"})
+            continue
+        if pending + len(created) >= MAX_PENDING:
+            skipped.append({"title": title, "reason": f"{MAX_PENDING} supervisor proposals are already pending"})
+            continue
+        try:
+            if f["task"] == "noise":
+                key, fp = "known", _fingerprint("noise", f["regex"])
+                cur = (store.current("known") or {"content": {}})["content"]
+                doc = runtime.validate_doc("known", runtime.apply_known_patch(cur, {"add_noise": [f["regex"]]}))
+            else:
+                d = f.get("draft")
+                if not d:
+                    skipped.append({"title": title, "reason": "no valid detector draft"})
+                    continue
+                key, fp = "detectors", _fingerprint("detector", d["id"], d["query"])
+                cur = (store.current("detectors") or {"content": {"detectors": []}})["content"]
+                if any(x.get("id") == d["id"] for x in cur.get("detectors", [])):
+                    skipped.append({"title": title, "reason": "a detector with this id already exists"})
+                    continue
+                doc = runtime.validate_doc("detectors", {"detectors": list(cur.get("detectors", [])) + [d]})
+        except runtime.DocError as e:
+            msg = "; ".join(e.errors)
+            skipped.append({"title": title, "reason": "already in the configuration" if "already present" in msg else "invalid: " + msg[:120]})
+            continue
+        if fp in blocked:
+            skipped.append({"title": title, "reason": "already proposed (pending, approved or recently rejected)"})
+            continue
+        if doc == cur:
+            skipped.append({"title": title, "reason": "already in the configuration"})
+            continue
+        bt = f.get("backtest")
+        what = f"noise regex {f['regex']}" if f["task"] == "noise" else f"detector {f['draft']['id']} (disabled): {f['query']}" + (f"; 7-day backtest {bt['firings']} firing(s), {bt['total']} line(s)" if bt else "")
+        comment = redact(f"[sup:{fp}] Supervisor {f['task']}: {f['title']}. {what}. {f['detail']}")
+        pid = store.add_proposal(key, doc, PROPOSAL_AUTHOR, comment, store.revision_id(key))
+        blocked.add(fp)
+        created.append({"id": pid, "key": key, "title": title})
+    return created, skipped
+
+
 def _enabled_tasks():
     t = aiops.CFG.get("SUPERVISOR_TASKS") or DEFAULT_TASKS
     return [x for x in TASKS if x in t]
@@ -668,8 +759,17 @@ def run_once(store, now=None, model=None):
         if errs:
             summary = (summary + " Errors: " + "; ".join(errs)).strip()
         report = redact_obj({"summary": summary[:1500], "findings": findings[:MAX_TOTAL_FINDINGS], "rejected": rejected[:MAX_TOTAL_FINDINGS], "tasks": tasks})
+        if aiops.CFG["SUPERVISOR_MODE"] == "propose" and status in ("ok", "partial", "budget"):
+            try:
+                made, skipped = make_proposals(store, report["findings"], now)
+            except Exception as e:  # noqa: BLE001 - a javaslat-beadas hibaja ne vesse el a jelentest
+                made, skipped = [], [{"title": "-", "reason": f"proposal step failed: {type(e).__name__}"}]
+                aiops.log(f"supervisor: javaslat-beadas hiba: {type(e).__name__}: {e}", key="sup_prop")
+            report["proposals"], report["proposals_skipped"] = made, skipped
+            if made:
+                report["summary"] = (report["summary"] + f" Filed {len(made)} proposal(s) for approval.").strip()[:1500]
         rid = store.sup_add_run(aiops.CFG["SUPERVISOR_MODE"], model_name, status, time.monotonic() - t0, total_tokens, report)
-        store.audit("supervisor", "run", f"run #{rid} status={status} model={model_name} tokens={total_tokens} findings={len(report['findings'])} rejected={len(report['rejected'])}")
+        store.audit("supervisor", "run", f"run #{rid} status={status} model={model_name} tokens={total_tokens} findings={len(report['findings'])} rejected={len(report['rejected'])} proposals={len(report.get('proposals', []))}")
         return rid
     finally:
         STATE["running"] = False
@@ -724,4 +824,4 @@ def status(store, now=None):
     return {"mode": c["SUPERVISOR_MODE"], "api": c["SUPERVISOR_API"], "model": c["SUPERVISOR_MODEL"] or "-",
             "endpoint_configured": bool(c["SUPERVISOR_URL"]), "key_configured": bool(c["SUPERVISOR_KEY"]),
             "interval_min": c["SUPERVISOR_INTERVAL_MIN"], "running": STATE["running"], "last_run": runs[0] if runs else None,
-            "next_run_utc": nxt, "tokens_today": tokens_today(store, now), "tokens_budget": c["SUPERVISOR_MAX_TOKENS_PER_DAY"], "tasks": list(_enabled_tasks()), "available_tasks": list(TASKS)}
+            "next_run_utc": nxt, "tokens_today": tokens_today(store, now), "tokens_budget": c["SUPERVISOR_MAX_TOKENS_PER_DAY"], "proposals_today": sum(1 for p in store.proposals(None, 500) if p["author"] == PROPOSAL_AUTHOR and str(p["ts"]).startswith(_day(now))), "proposals_per_day": c["SUPERVISOR_MAX_PROPOSALS_PER_DAY"], "tasks": list(_enabled_tasks()), "available_tasks": list(TASKS)}

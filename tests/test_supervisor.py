@@ -610,6 +610,157 @@ class CoverageGuardTests(CoverageBase):
         self.assertIn("zero findings is a good answer", p)
 
 
+class Dispatch(FakeModel):
+    """Feladatonkent mas valaszt ad (a bemenet 'task' mezoje alapjan)."""
+
+    def __init__(self, by_task, tokens=100):
+        super().__init__(tokens=tokens)
+        self.by_task = by_task
+
+    def complete(self, system, user):
+        task = json.loads(user)["task"]
+        self.calls.append((task, user))
+        return json.dumps({"summary": "s", "findings": self.by_task.get(task, [])}), self.tokens
+
+
+NOISE_RX = r"supervisor\.docker\.manager\] Exporting image \d+/addon-diyhue"
+SMART_Q = 'host:=homenas2 appname:=smartd "FAILED SMART self-check"'
+
+
+class ProposeTests(CoverageBase):
+    def setUp(self):
+        super().setUp()
+        self.rt = runtime.Runtime(self.store)
+        self.rt.bootstrap()                       # known / detectors alapdokumentum; a beallitasokat alapra allitja
+        aiops.CFG.update(SUPERVISOR_MODE="propose", SUPERVISOR_TASKS=["noise", "coverage_gap"], SUPERVISOR_MAX_PROPOSALS_PER_RUN=3,
+                         SUPERVISOR_MAX_PROPOSALS_PER_DAY=10)
+        self.ids = add_findings(self.store, [{"tmpl": EXPORT, "level": "info"}])
+        inp, refs = supervisor.coverage_input()
+        self.gref = next(i["ref"] for i in inp["items"] if i["host"] == "homenas2")
+        self.noise = {"task": "noise", "severity": "info", "title": "Exporting chatter", "detail": "routine", "refs": [self.ids[EXPORT]], "regex": NOISE_RX, "query": ""}
+        self.gap = {"task": "coverage_gap", "severity": "critical", "title": "SMART failures", "detail": "98 lines", "refs": [self.gref], "regex": "", "query": SMART_Q}
+
+    def go(self, noise=True, gap=True, now=None, model=None):
+        m = model or Dispatch({"noise": [self.noise] if noise else [], "coverage_gap": [self.gap] if gap else []})
+        supervisor.run_once(self.store, now=now, model=m)
+        return self.report()
+
+    def mine(self, status=None):
+        return [p for p in self.store.proposals(status, 500) if p["author"] == "supervisor"]
+
+    def test_report_mode_files_nothing(self):
+        aiops.CFG["SUPERVISOR_MODE"] = "report"
+        r = self.go()
+        self.assertEqual(self.mine(), [])
+        self.assertNotIn("proposals", r)
+
+    def test_propose_files_validated_suggestions_for_approval(self):
+        before = (self.store.revision_id("known"), self.store.revision_id("detectors"))
+        r = self.go()
+        props = self.mine()
+        self.assertEqual({p["key"] for p in props}, {"known", "detectors"})
+        self.assertTrue(all(p["status"] == "pending" and p["comment"].startswith("[sup:") for p in props))
+        self.assertEqual({(p["id"], p["key"]) for p in props}, {(x["id"], x["key"]) for x in r["proposals"]})
+        self.assertEqual((self.store.revision_id("known"), self.store.revision_id("detectors")), before)   # semmi nem alkalmazodott
+        self.assertIn("Filed 2 proposal(s)", r["summary"])
+        self.assertEqual(self.store.audit_list(1)[0]["actor"], "supervisor")
+
+    def test_approval_applies_the_noise_and_a_disabled_detector(self):
+        self.go()
+        for p in self.mine():
+            self.store.decide(p["id"], True, "admin")
+        known = self.store.current("known")["content"]
+        self.assertIn(NOISE_RX, known["noise"])
+        det = [d for d in self.store.current("detectors")["content"]["detectors"] if d["id"] == "gap-homenas2-smartd"]
+        self.assertEqual(len(det), 1)
+        self.assertFalse(det[0]["enabled"])                      # az engedelyezes kulon (emberi) lepes
+        self.assertEqual(det[0]["query"], SMART_Q)
+
+    def test_dedup_pending_approved_and_recently_rejected(self):
+        self.go()
+        n = len(self.mine())
+        r = self.go()
+        self.assertEqual(len(self.mine()), n)                    # fuggo: nincs duplikalas
+        self.assertTrue(all("already proposed" in x["reason"] for x in r["proposals_skipped"]))
+        first = self.mine()
+        self.store.decide(first[0]["id"], False, "admin")        # elutasitva
+        self.store.decide(first[1]["id"], True, "admin")         # jovahagyva
+        self.go()
+        self.assertEqual(len(self.mine()), n)                    # elutasitott (30 napig) es jovahagyott sem jon vissza
+
+    def test_rejected_proposal_comes_back_after_30_days(self):
+        self.go(noise=True, gap=False)
+        p = self.mine()[0]
+        self.store.decide(p["id"], False, "admin")
+        import datetime as dt
+        later = aiops.utcnow() + dt.timedelta(days=31)
+        self.go(noise=True, gap=False, now=later)
+        self.assertEqual(len(self.mine()), 2)
+
+    def test_per_run_and_daily_limits(self):
+        aiops.CFG["SUPERVISOR_MAX_PROPOSALS_PER_RUN"] = 1
+        r = self.go()
+        self.assertEqual(len(r["proposals"]), 1)
+        self.assertEqual(r["proposals"][0]["key"], "detectors")  # a hianyzo riasztas erosebb, mint a zaj
+        self.assertIn("per-run", r["proposals_skipped"][0]["reason"])
+        aiops.CFG["SUPERVISOR_MAX_PROPOSALS_PER_RUN"] = 5
+        aiops.CFG["SUPERVISOR_MAX_PROPOSALS_PER_DAY"] = 1
+        r = self.go()
+        self.assertEqual(r["proposals"], [])
+        self.assertIn("daily", r["proposals_skipped"][0]["reason"])
+
+    def test_pending_cap(self):
+        aiops.CFG["SUPERVISOR_MAX_PROPOSALS_PER_DAY"] = 100     # a kitoltok is a mai szamlalot novelik: a fuggo-limitet vizsgaljuk
+        for i in range(supervisor.MAX_PENDING):
+            self.store.add_proposal("known", {"noise": [f"x{i}"]}, "supervisor", f"filler {i}", self.store.revision_id("known"))
+        r = self.go()
+        self.assertEqual(r["proposals"], [])
+        self.assertIn("already pending", r["proposals_skipped"][0]["reason"])
+
+    def test_already_in_configuration_is_skipped(self):
+        cur = self.store.current("known")["content"]
+        self.store.put("known", dict(cur, noise=list(cur.get("noise", [])) + [NOISE_RX]), "admin", "manual")
+        d = supervisor.detector_draft({"host": "homenas2", "ident": "smartd"}, {}, SMART_Q)
+        self.store.put("detectors", {"detectors": [d]}, "admin", "manual")
+        r = self.go()
+        self.assertEqual(r["proposals"], [])
+        reasons = " ".join(x["reason"] for x in r["proposals_skipped"])
+        self.assertIn("already in the configuration", reasons)
+        self.assertIn("already exists", reasons)
+
+    def test_guard_rejected_regex_is_never_proposed(self):
+        self.noise["regex"] = ".*"
+        r = self.go(gap=False)
+        self.assertEqual(self.mine(), [])
+        self.assertEqual(r["proposals"], [])
+        self.assertTrue(r["rejected"])
+
+    def test_other_tasks_never_file_proposals(self):
+        aiops.CFG["SUPERVISOR_TASKS"] = ["overview", "incident_review"]
+        m = Dispatch({"overview": [{"task": "overview", "severity": "high", "title": "t", "detail": "d", "refs": [], "regex": "", "query": ""}]})
+        r = self.go(model=m)
+        self.assertEqual(self.mine(), [])
+        self.assertEqual(r["proposals"], [])
+
+    def test_a_failing_proposal_step_keeps_the_report(self):
+        def boom(*a, **k):
+            raise RuntimeError("db locked")
+        orig = self.store.add_proposal
+        self.store.add_proposal = boom
+        try:
+            r = self.go()
+        finally:
+            self.store.add_proposal = orig
+        self.assertEqual(self.store.sup_runs()[0]["status"], "ok")
+        self.assertTrue(r["findings"])
+        self.assertIn("proposal step failed", r["proposals_skipped"][0]["reason"])
+
+    def test_status_shows_the_daily_count(self):
+        self.go()
+        s = supervisor.status(self.store)
+        self.assertEqual((s["proposals_today"], s["proposals_per_day"]), (2, 10))
+
+
 class MultiTaskTests(Base):
     def test_one_failing_task_gives_partial(self):
         add_findings(self.store, [{"tmpl": EXPORT, "level": "info"}])
@@ -724,7 +875,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(ok["SUPERVISOR_URL"], "https://gpu.example:8000")
         _, errs = settings.validate({"SUPERVISOR_URL": "", "SUPERVISOR_MODEL": ""})
         self.assertEqual(errs, [])    # ures = nincs beallitva
-        for bad in ({"SUPERVISOR_MODE": "propose"}, {"SUPERVISOR_URL": "http://h:1/path"}, {"SUPERVISOR_INTERVAL_MIN": 1},
+        for bad in ({"SUPERVISOR_MODE": "auto"}, {"SUPERVISOR_URL": "http://h:1/path"}, {"SUPERVISOR_INTERVAL_MIN": 1},
                     {"SUPERVISOR_API": "x"}, {"SUPERVISOR_KEY": "k"}):
             self.assertTrue(settings.validate(bad)[1], bad)
 

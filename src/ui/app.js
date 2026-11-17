@@ -957,17 +957,21 @@ async function pageSupervisor() {
           f.backtest ? h('div', { class: 'muted' }, 'Backtest ' + (f.backtest.hours / 24) + ' d: ' + f.backtest.firings + ' firing(s), ' + f.backtest.total + ' matching line(s)') : null,
           f.draft ? h('details', {}, h('summary', { class: 'muted' }, 'Detector draft (disabled, not applied)'), h('pre', { class: 'diff' }, JSON.stringify(f.draft, null, 1))) : null,
           f.refs && f.refs.length ? h('div', { class: 'muted' }, 'refs: ' + f.refs.join(', ')) : null))))) : null,
+    (r.report.proposals || []).length ? h('div', { class: 'note' }, 'Filed for approval: ', (r.report.proposals).map((p, i) => [i ? ', ' : '', h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('proposals'); } }, '#' + p.id), ' (' + p.key + ')'])) : null,
+    (r.report.proposals_skipped || []).length ? h('details', {}, h('summary', { class: 'muted small' }, (r.report.proposals_skipped.length) + ' suggestion(s) not filed (duplicate, limit, ...)'),
+      h('ul', { class: 'small' }, r.report.proposals_skipped.map((x) => h('li', {}, x.title + ': ' + x.reason)))) : null,
     (r.report.rejected || []).length ? h('details', {}, h('summary', { class: 'muted small' }, (r.report.rejected.length) + ' suggestion(s) rejected by the guards'),
       h('ul', { class: 'small' }, r.report.rejected.map((x) => h('li', {}, x.title + ': ' + x.reason + (x.regex ? ' (' + x.regex + ')' : ''))))) : null);
   renderShell([
     h('h2', {}, 'Supervisor'),
-    h('div', { class: 'note' }, 'Read-only review of the service state by a separate model. It never changes anything; in this version it only writes reports. Off by default.'),
+    h('div', { class: 'note' }, 'Periodic review of the service state by a separate model. It never changes anything itself: in report mode it writes reports, in propose mode it also files validated suggestions as proposals that an admin must approve. Off by default.'),
     h('div', { class: 'panel' },
       h('div', { class: 'row' }, h('span', { class: 'badge ' + (st.mode === 'off' ? 'b-unknown' : 'b-up') }, st.mode),
         h('span', { class: 'muted small grow' }, 'API: ' + st.api + ' · model: ' + st.model + ' · endpoint ' + (st.endpoint_configured ? 'set' : 'not set') + ' · key ' + (st.key_configured ? 'set' : 'not set')
           + ' · every ' + st.interval_min + ' min' + (st.next_run_utc ? ' · next: ' + fmtTime(st.next_run_utc) : '')),
         isAdmin() && st.mode !== 'off' ? h('button', { class: 'btn', disabled: st.running, onclick: runNow }, st.running ? 'Running...' : 'Run now') : null),
-      h('div', { class: 'muted small', style: 'margin-top:8px' }, 'Token budget today: ' + st.tokens_today + ' / ' + st.tokens_budget + ' (' + pct + '%). Change the mode and the model on the Settings page.')),
+      h('div', { class: 'muted small', style: 'margin-top:8px' }, 'Token budget today: ' + st.tokens_today + ' / ' + st.tokens_budget + ' (' + pct + '%)'
+        + (st.mode === 'propose' ? ' · proposals filed today: ' + st.proposals_today + ' / ' + st.proposals_per_day : '') + '. Change the mode and the model on the Settings page.')),
     runs.length ? runs.map(runCard) : h('p', { class: 'muted' }, st.mode === 'off' ? 'The supervisor is off.' : 'No run yet.'),
   ]);
 }
