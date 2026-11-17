@@ -493,6 +493,27 @@ class IncidentReviewTests(Base):
         self.assertEqual([(f["title"], f["task"], f["regex"]) for f in r["findings"]], [("good", "incident_review", "")])
         self.assertEqual(r["rejected"][0]["title"], "invented")
 
+    def test_reviewed_incident_is_not_sent_again(self):
+        # alpha.13: a 48 oras ablak miatt ugyanaz az incidens minden ciklusban ujra bekerult (a mar dontott/jelzett gyokerokkel egyutt)
+        m = FakeModel(content={"summary": "ok", "findings": []})
+        supervisor.run_once(self.store, model=m)
+        self.assertEqual(len(json.loads(m.calls[0][1])["items"]), 1)
+        m2 = FakeModel(content={"summary": "ok", "findings": []})
+        supervisor.run_once(self.store, model=m2, now=aiops.utcnow() + aiops.dt.timedelta(hours=6))
+        self.assertEqual(m2.calls, [])                            # nincs uj incidens: modellhivas sem
+        aiops.vl_query = lambda q, timeout=None: [dict(HEAD), dict(HEAD, id="incident-new")] if "kind:incident" in q else [dict(ISSUE)]
+        m3 = FakeModel(content={"summary": "ok", "findings": []})
+        supervisor.run_once(self.store, model=m3, now=aiops.utcnow() + aiops.dt.timedelta(hours=12))
+        self.assertEqual([i["ref"] for i in json.loads(m3.calls[0][1])["items"]], ["incident-new"])
+
+    def test_seen_list_is_capped_and_survives_garbage(self):
+        self.store.nov_set_meta(supervisor.SEEN_KEY, "{not json")
+        self.assertEqual(supervisor._load_seen(self.store), [])
+        supervisor._save_seen(self.store, [f"i{n}" for n in range(supervisor.SEEN_MAX + 50)])
+        seen = supervisor._load_seen(self.store)
+        self.assertEqual(len(seen), supervisor.SEEN_MAX)
+        self.assertEqual(seen[-1], f"i{supervisor.SEEN_MAX + 49}")
+
     def test_vl_down_marks_the_task_failed(self):
         def boom(q, timeout=None):
             raise OSError("down")
@@ -574,6 +595,21 @@ class CoverageInputTests(CoverageBase):
         supervisor.GET_KNOWN = lambda: K()
         inp, _ = supervisor.coverage_input()
         self.assertEqual({i["host"] for i in inp["items"]}, {"homesrv3"})
+
+
+    def test_groups_with_an_existing_detector_are_skipped_even_if_disabled(self):
+        # alpha.13: a mar felvett (letiltott) detektorra a Supervisor nem ismetli meg a jelzest: a dontes az emberre var
+        dets = [{"id": "gap-homenas2-smartd", "enabled": False, "query": 'host:=homenas2 appname:=smartd "FAILED SMART self-check"'}]
+        inp, _ = supervisor.coverage_input(dets=dets)
+        hosts = {i["host"] for i in inp["items"]}
+        self.assertNotIn("homenas2", hosts)
+        self.assertIn("homesrv3", hosts)
+        self.assertEqual(inp["covered_count"], 1)                 # a detektor miatti kihagyas nem noveli a lefedett riasztasok szamat
+
+    def test_detector_for_another_ident_does_not_hide_the_group(self):
+        dets = [{"id": "x", "enabled": True, "query": 'host:=homenas2 appname:=crond "FAILED"'}]
+        inp, _ = supervisor.coverage_input(dets=dets)
+        self.assertIn("homenas2", {i["host"] for i in inp["items"]})
 
 
 class CoverageGuardTests(CoverageBase):
@@ -773,6 +809,16 @@ class ProposeTests(CoverageBase):
         ids = [d["id"] for d in self.store.proposal(r["proposals"][0]["id"])["content"]["detectors"]]
         self.assertIn("gap-homenas2-systemd-networkd-wait-online", ids)
         self.assertEqual(r["proposals_skipped"], [])
+        # alpha.13: a megjegyzesben (amit az ember jovahagyaskor lat) is az id olvashato, nem <redacted-token>
+        comment = self.store.proposal(r["proposals"][0]["id"])["comment"]
+        self.assertIn("detector gap-homenas2-systemd-networkd-wait-online (disabled)", comment)
+        self.assertNotIn("<redacted-token>", comment)
+
+    def test_free_text_in_the_comment_is_still_redacted(self):
+        gap = dict(self.gap, detail="leaked token=abc123secretvalue in the sample")
+        r = self.go(noise=False, model=Dispatch({"noise": [], "coverage_gap": [gap]}))
+        comment = self.store.proposal(r["proposals"][0]["id"])["comment"]
+        self.assertNotIn("abc123secretvalue", comment)
 
     def finding_for(self, ref, query):
         return {"task": "coverage_gap", "severity": "medium", "title": "Timeouts", "detail": "10 lines", "refs": [ref], "regex": "", "query": query}
@@ -801,7 +847,18 @@ class ProposeTests(CoverageBase):
         self.assertEqual(r["proposals"], [])
         reasons = " ".join(x["reason"] for x in r["proposals_skipped"])
         self.assertIn("already in the configuration", reasons)
-        self.assertIn("already exists", reasons)
+        # alpha.13: a detektorral mar lefedett csoport ki sem kerul a bemenetbol, igy a modell rá nem is javasolhat
+        inp, _ = supervisor.coverage_input(dets=self.store.current("detectors")["content"]["detectors"])
+        self.assertNotIn("homenas2", {i["host"] for i in inp["items"]})
+        self.assertEqual(self.mine(), [])
+
+    def test_same_detector_id_with_a_different_filter_is_still_skipped(self):
+        # a vedo ag: az id foglalt, de a szuro nem nevezi meg a hosztot+azonositot (igy a csoport nem rejtett)
+        d = supervisor.detector_draft({"host": "homenas2", "ident": "smartd"}, {}, 'host:=homenas2 "something else entirely"')
+        self.store.put("detectors", {"detectors": [d]}, "admin", "manual")
+        r = self.go(noise=False)
+        self.assertEqual(r["proposals"], [])
+        self.assertIn("already exists", " ".join(x["reason"] for x in r["proposals_skipped"]))
 
     def test_guard_rejected_regex_is_never_proposed(self):
         self.noise["regex"] = ".*"

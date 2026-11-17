@@ -167,3 +167,8 @@ approving now does a **three-way merge** (`merge.py`): base (the revision the pr
 document: list items that were added or removed are added or removed (items with an `id`, e.g. detectors, are matched by id), dictionary keys recursively, a scalar is taken when the current value did
 not change from the base. Both sides changing the same scalar / the same `id` differently is a conflict and needs `force` (the proposal's own content then wins). The merged document is validated
 like any other change; the Proposals page shows "will merge" / "conflict" and the merged diff.
+
+### Fewer repeated suggestions (v2.0.0-alpha.13)
+- `coverage_gap` skips a group when **any** existing detector filter (enabled or disabled) names both its host and its source: the operator already has a decision pending or made for it.
+- `incident_review` remembers the incident ids it has reviewed (last 300) and does not send them to the model again, although the 48 h look-back window still contains them.
+- The proposal comment keeps the (validated) detector id readable; only the free text (title, detail, regex, filter) goes through the secret filter.

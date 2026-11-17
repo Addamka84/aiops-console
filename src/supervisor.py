@@ -302,8 +302,9 @@ def noise_input(store):
     return {"task": "noise", "items": items}, refs, allf
 
 
-def incident_input(now=None):
-    """Az utolso INCIDENT_WINDOW_H ora AI-incidensei (a VictoriaLogs pipeline:ai esemenyeibol). -> (bemenet, {ref})"""
+def incident_input(now=None, seen=()):
+    """Az utolso INCIDENT_WINDOW_H ora AI-incidensei (a VictoriaLogs pipeline:ai esemenyeibol). -> (bemenet, {ref})
+    A seen-ben levo (mar atnezett) incidensek kimaradnak: ugyanaz az incidens a 48 oras ablak miatt kulonben minden ciklusban ujra bekerulne."""
     n = max(1, min(20, aiops.CFG["SUPERVISOR_MAX_ITEMS"] // 4))
     heads = aiops.vl_query(f"_time:{INCIDENT_WINDOW_H}h pipeline:ai kind:incident | sort by (_time desc) | limit {n}", timeout=20)
     issues = aiops.vl_query(f"_time:{INCIDENT_WINDOW_H}h pipeline:ai kind:issue | sort by (_time desc) | limit 400", timeout=20)
@@ -315,7 +316,7 @@ def incident_input(now=None):
     items = []
     for hd in heads:
         ref = str(hd.get("id", ""))
-        if not ref:
+        if not ref or ref in seen:
             continue
         items.append({"ref": ref, "time": str(hd.get("_time", ""))[:19], "alert": str(hd.get("alert", ""))[:240], "summary": str(hd.get("_msg", ""))[:400],
                       "correlated_alerts": hd.get("correlated_alerts", "1"), "root_hypothesis": str(hd.get("root_hypothesis", "")),
@@ -334,8 +335,10 @@ COVERAGE_MAX_FIRINGS = 14         # a javasolt szuro visszatesztje (7 nap, 60 pe
 _SAFE_VAL = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
 
 
-def coverage_input(now=None):
-    """Magas sulyossagu naplocsoportok az elmult COVERAGE_WINDOW_H orabol, amelyekre nem tuzelt riasztas. -> (bemenet, {ref: elem})"""
+def coverage_input(now=None, dets=None):
+    """Magas sulyossagu naplocsoportok az elmult COVERAGE_WINDOW_H orabol, amelyekre nem tuzelt riasztas. -> (bemenet, {ref: elem})
+    dets: a meglevo detektorok (akar letiltottak): az a csoport, amelynek hosztjat ES azonositojat egy detektor szuroje megnevezi, mar dontes targya, nem jelolt."""
+    dqs = [str(d.get("query", "")).lower() for d in (dets or [])]
     w = COVERAGE_WINDOW_H
     groups = []
     for r in aiops.vl_query(f"_time:{w}h PRIORITY:in(0,1,2,3) | stats by (_HOSTNAME, SYSLOG_IDENTIFIER) count() as hits, any(_msg) as sample | sort by (hits desc) | limit 40", timeout=30):
@@ -351,6 +354,8 @@ def coverage_input(now=None):
         sample = str(r.get("sample", ""))
         if known is not None and known.classify_idx(f"{host} | {ident} | {sample}")[0] != "keep":   # zaj, szuneteltetes VAGY ismert ugy: az ember mar tud rola (pl. "replacement pending")
             continue
+        if any(host.lower() in q and ident.lower() in q for q in dqs):
+            continue    # van mar (akar letiltott) detektor erre: a dontes az emberre var
         if any(host.lower() in m and ident.lower() in m for m in alerts):
             covered += 1
             continue
@@ -682,8 +687,9 @@ def make_proposals(store, findings, now=None):
             skipped.append({"title": title, "reason": "already in the configuration"})
             continue
         bt = f.get("backtest")
-        what = f"noise regex {f['regex']}" if f["task"] == "noise" else f"detector {f['draft']['id']} (disabled): {f['query']}" + (f"; 7-day backtest {bt['firings']} firing(s), {bt['total']} line(s)" if bt else "")
-        comment = redact(f"[sup:{fp}] Supervisor {f['task']}: {f['title']}. {what}. {f['detail']}")
+        # a detektor-id validalt ([a-z0-9-], max 44 jel): a titokszuro a hosszat tokennek nezne, ezert CSAK a szabad szoveget szurjuk
+        what = f"noise regex {redact(f['regex'])}" if f["task"] == "noise" else f"detector {f['draft']['id']} (disabled): {redact(f['query'])}" + (f"; 7-day backtest {bt['firings']} firing(s), {bt['total']} line(s)" if bt else "")
+        comment = f"[sup:{fp}] Supervisor {f['task']}: {redact(f['title'])}. {what}. {redact(f['detail'])}"
         pid = store.add_proposal(key, doc, PROPOSAL_AUTHOR, comment, store.revision_id(key))
         blocked.add(fp)
         created.append({"id": pid, "key": key, "title": title})
@@ -693,6 +699,21 @@ def make_proposals(store, findings, now=None):
 def _enabled_tasks():
     t = aiops.CFG.get("SUPERVISOR_TASKS") or DEFAULT_TASKS
     return [x for x in TASKS if x in t]
+
+
+SEEN_KEY, SEEN_MAX = "sup_inc_seen", 300
+
+
+def _load_seen(store):
+    try:
+        v = json.loads(store.nov_meta(SEEN_KEY, "[]"))
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except ValueError:
+        return []
+
+
+def _save_seen(store, refs):
+    store.nov_set_meta(SEEN_KEY, json.dumps(list(dict.fromkeys(refs))[-SEEN_MAX:]))
 
 
 def _run_task(name, store, snap, model, now):
@@ -705,13 +726,14 @@ def _run_task(name, store, snap, model, now):
         ctx = {"refs": refs, "all": allf}
     elif name == "incident_review":
         try:
-            inp, refs = incident_input(now)
+            inp, refs = incident_input(now, set(_load_seen(store)))
         except (OSError, ValueError, http.client.HTTPException) as e:
             raise ModelError(f"incident data unavailable ({type(e).__name__})")
         ctx = {"refs": refs}
     elif name == "coverage_gap":
         try:
-            inp, refs = coverage_input(now)
+            dets = ((store.current("detectors") or {"content": {}})["content"] or {}).get("detectors", [])
+            inp, refs = coverage_input(now, dets)
         except (OSError, ValueError, http.client.HTTPException) as e:
             raise ModelError(f"log data unavailable ({type(e).__name__})")
         ctx = {"refs": refs}
@@ -722,6 +744,8 @@ def _run_task(name, store, snap, model, now):
     content, tokens = model.complete(PROMPTS[name], text)
     add_tokens(store, tokens, now)
     part = parse_report(content, name, ctx)
+    if name == "incident_review":
+        _save_seen(store, list(_load_seen(store)) + sorted(ctx["refs"]))
     if name != "overview":   # a modell szabad szoveges osszegzese itt nem kerul a jelentesbe (elofordult kitalalt tartalom): a szamok determinisztikusak
         label = {"noise": "Noise: reviewed {n} open findings, {a} suggestion(s) accepted, {r} rejected by the guards.",
                  "incident_review": "Incident review: {n} incident(s) reviewed, {a} flagged.",
