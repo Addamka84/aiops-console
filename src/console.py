@@ -20,6 +20,7 @@ import detectors
 import novelty
 import runtime
 import settings
+import supervisor
 import topology
 from store import StoreError
 
@@ -322,6 +323,22 @@ def create_app(rt, tokens=None):
         except (OSError, ValueError):
             out["recent_error"] = "VictoriaLogs unavailable"
         return out
+
+    # ------------------------------------------------------------ Auto AI Supervisor (csak olvaso attekintes, jelentes)
+    @app.get("/api/v1/supervisor")
+    def supervisor_status(_: Actor = Depends(read)):
+        return supervisor.status(store)
+
+    @app.get("/api/v1/supervisor/runs")
+    def supervisor_runs(limit: int = Query(20, ge=1, le=200), _: Actor = Depends(read)):
+        return store.sup_runs(limit)
+
+    @app.post("/api/v1/supervisor/run")
+    def supervisor_run(who: Actor = Depends(admin)):
+        if not supervisor.request_run():
+            raise HTTPException(409, "the supervisor is off (SUPERVISOR_MODE)")
+        store.audit(who.name, "supervisor-run", "manual run requested")
+        return {"requested": True}
 
     # ------------------------------------------------------------ javaslatok (a felhasznalo hagyja jova)
     @app.post("/api/v1/proposals")

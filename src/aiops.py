@@ -86,8 +86,18 @@ CFG = {
     "FLAP_COUNT": _env_int("FLAP_COUNT", 4),                                     # 0 = kikapcsolva
     "FLAP_WINDOW_H": _env_int("FLAP_WINDOW_H", 6),
     "FLAP_COOLDOWN_MIN": _env_int("FLAP_COOLDOWN_MIN", 180),
+    # Auto AI Supervisor (supervisor.py): idoszakos, CSAK OLVASO ellenorzes kulon modellel. Alapbol ki; a kulcs CSAK kornyezeti valtozo.
+    "SUPERVISOR_MODE": os.environ.get("SUPERVISOR_MODE", "off"),                 # off | report
+    "SUPERVISOR_INTERVAL_MIN": _env_int("SUPERVISOR_INTERVAL_MIN", 360),         # perc
+    "SUPERVISOR_API": os.environ.get("SUPERVISOR_API", "openai"),                # openai | mock (a mock csak teszthez/bemutatohoz: determinisztikus)
+    "SUPERVISOR_URL": os.environ.get("SUPERVISOR_URL", "").strip().rstrip("/"),  # a supervisor modell vegpontja (http(s)://host:port)
+    "SUPERVISOR_MODEL": os.environ.get("SUPERVISOR_MODEL", "").strip(),
+    "SUPERVISOR_NUM_CTX": _env_int("SUPERVISOR_NUM_CTX", 32768),                 # a bemenet merethatara (tokenbecsles: 4 karakter / token)
+    "SUPERVISOR_TIMEOUT_S": _env_int("SUPERVISOR_TIMEOUT_S", 300),
+    "SUPERVISOR_MAX_TOKENS_PER_DAY": _env_int("SUPERVISOR_MAX_TOKENS_PER_DAY", 400000),  # koltsegkeret (UTC nap); tullepes utan modellhivas nelkuli jelentes
+    "SUPERVISOR_KEY": os.environ.get("SUPERVISOR_KEY", "").strip(),
 }
-__version__ = "1.9.1"
+__version__ = "2.0.0-alpha.1"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1355,6 +1365,8 @@ def service_loop(get_known, store=None):
         threading.Thread(target=novelty.run_loop, args=(store, get_known), daemon=True, name="novelty").start()
         import detectors
         threading.Thread(target=detectors.run_loop, daemon=True, name="detectors").start()
+        import supervisor
+        threading.Thread(target=supervisor.run_loop, args=(store,), daemon=True, name="supervisor").start()
     log(f"aiops indul: modell {CFG['MODEL']}, vegpontok {CFG['OLLAMA_URLS']}, osszefoglalo {CFG['DIGEST_UTC']} UTC")
     last_poll = 0.0
     last_hb = None

@@ -46,6 +46,14 @@ SPEC = {
     "CORRELATE_SETTLE_S": {"type": "int", "min": 10, "max": 900, "desc": "How long to wait after the last related alert before the incident analysis starts (s)."},
     "CORRELATE_WINDOW_MIN": {"type": "int", "min": 1, "max": 120, "desc": "Alerts arriving within this many minutes can be related (minutes)."},
     "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
+    "SUPERVISOR_MODE": {"type": "choice", "choices": ["off", "report"], "desc": "Auto AI Supervisor (read-only periodic review by a separate model): off | report (writes a report; never changes anything)."},
+    "SUPERVISOR_INTERVAL_MIN": {"type": "int", "min": 15, "max": 10080, "desc": "How often the supervisor runs (minutes)."},
+    "SUPERVISOR_API": {"type": "choice", "choices": ["openai", "mock"], "desc": "Supervisor model API: openai (OpenAI-compatible) | mock (deterministic, no model; for tests and demos). The API key is the environment variable SUPERVISOR_KEY only."},
+    "SUPERVISOR_URL": {"type": "url0", "desc": "Supervisor model endpoint (http(s)://host:port, no path); empty = not configured. Separate from the triage model."},
+    "SUPERVISOR_MODEL": {"type": "str0", "desc": "Supervisor model name (separate from MODEL)."},
+    "SUPERVISOR_NUM_CTX": {"type": "int", "min": 2048, "max": 1048576, "desc": "Largest supervisor input (tokens; estimated as 4 characters per token)."},
+    "SUPERVISOR_TIMEOUT_S": {"type": "int", "min": 10, "max": 3600, "desc": "Maximum duration of one supervisor model call (s)."},
+    "SUPERVISOR_MAX_TOKENS_PER_DAY": {"type": "int", "min": 1000, "max": 100000000, "desc": "Token budget per UTC day; once exceeded, runs write a report without calling the model."},
 }
 
 _URL_RX = re.compile(r"^https?://[^/\s]+$")
@@ -70,6 +78,15 @@ def _coerce(key, spec, v):
         if not isinstance(v, str) or not v.strip():
             return None, "must be a non-empty string"
         return v.strip(), None
+    if t in ("url0", "str0"):   # ures ertek megengedett (= nincs beallitva)
+        if not isinstance(v, str):
+            return None, "must be a string"
+        v = v.strip().rstrip("/") if t == "url0" else v.strip()
+        if t == "url0" and v and not _URL_RX.match(v):
+            return None, "must look like http://host:port (no path) or be empty"
+        if len(v) > 200:
+            return None, "too long"
+        return v, None
     if t == "keepalive":
         if not isinstance(v, str) or not _KEEPALIVE_RX.match(v.strip()):
             return None, "must look like 2m, 30s, 1h or -1"

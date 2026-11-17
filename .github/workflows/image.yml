@@ -39,12 +39,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
         run: |
-          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aiops-console" >> "$GITHUB_OUTPUT"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aiops-console"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          # A pre-release tag (e.g. v2.0.0-alpha.1) never moves `latest`.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "tags=$image:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            printf 'tags=%s:%s,%s:latest\n' "$image" "$GITHUB_REF_NAME" "$image" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
-            ${{ steps.meta.outputs.image }}:latest
+          tags: ${{ steps.meta.outputs.tags }}

@@ -48,6 +48,9 @@ class Store:
                     hits INTEGER NOT NULL, baseline REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open');
                 CREATE INDEX IF NOT EXISTS nov_findings_ts ON nov_findings (ts);
                 CREATE TABLE IF NOT EXISTS nov_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS sup_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, mode TEXT NOT NULL, model TEXT NOT NULL,
+                    status TEXT NOT NULL, secs REAL NOT NULL, tokens INTEGER NOT NULL, report TEXT NOT NULL);
             """)
             self.db.commit()
 
@@ -258,6 +261,26 @@ class Store:
             self.db.execute("""DELETE FROM nov_findings WHERE id NOT IN
                                (SELECT id FROM nov_findings ORDER BY id DESC LIMIT ?)""", (max_findings,))
             self.db.commit()
+
+    # ---- supervisor (supervisor.py): futasok jelentesei. A konfig-verziozashoz nem tartozik.
+    def sup_add_run(self, mode, model, status, secs, tokens, report, keep=200):
+        with self.lock:
+            cur = self.db.execute("INSERT INTO sup_runs (ts, mode, model, status, secs, tokens, report) VALUES (?,?,?,?,?,?,?)",
+                                  (now_iso(), mode, model, status, round(float(secs), 1), int(tokens), json.dumps(report, ensure_ascii=False)))
+            self.db.execute("DELETE FROM sup_runs WHERE id NOT IN (SELECT id FROM sup_runs ORDER BY id DESC LIMIT ?)", (keep,))
+            self.db.commit()
+            return cur.lastrowid
+
+    def sup_runs(self, limit=20, with_report=True):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM sup_runs ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        out = []
+        for r in rows:
+            d = {k: r[k] for k in ("id", "ts", "mode", "model", "status", "secs", "tokens")}
+            if with_report:
+                d["report"] = json.loads(r["report"])
+            out.append(d)
+        return out
 
     # ---- audit
     def _audit(self, actor, action, detail):

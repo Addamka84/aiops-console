@@ -58,6 +58,14 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   so an alert rule can notice a dead service or an LLM that has been unreachable for a day. `GET /api/v1/health` is open for external monitors.
 - **Secrets stay in environment variables** (tokens, webhook URL); they are never written to the config store and the API never returns them.
 
+- **Auto AI Supervisor (v2.0-alpha, off by default)**: a periodic, **read-only** review of the service state (alerts, incidents, detectors, novelty findings,
+  proposals) by a *separate* model (OpenAI-compatible endpoint: `SUPERVISOR_URL`, `SUPERVISOR_MODEL`, key in the environment variable `SUPERVISOR_KEY` only),
+  so a larger model can supervise while a small one triages. `SUPERVISOR_MODE=report` writes a report per run (Supervisor tab); it never changes
+  configuration and never creates proposals in this version. Guards: secrets are redacted from the model input and output, the model output is
+  schema-checked and every unknown key is dropped, a daily token budget (`SUPERVISOR_MAX_TOKENS_PER_DAY`; beyond it a rule-based report is written without calling the model),
+  its own thread (a slow or dead model endpoint never delays triage), `off` makes no model call. `SUPERVISOR_API=mock` gives a deterministic report for tests and demos.
+  Planned: noise / incident-review / coverage-gap / detector tasks, then proposals (admin approval stays) - see `docs/aiops-supervisor-terv.md` in the lab repo.
+
 ## Run
 See [`docker-compose.example.yml`](docker-compose.example.yml). Required: `VL_URL`, `OLLAMA_URLS`, `CONSOLE_ADMIN_TOKEN`.
 The first start seeds the config from `KNOWN_FILE` (if set and valid) or the built-in generic default; after that the store in `/data` is the source of truth.
@@ -102,6 +110,7 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |
 | `DELETE /snoozes/{id}` (admin) | un-mute / remove an expired entry |
 | `POST /jobs/digest` / `POST /jobs/notify-test` (admin) | run a digest now / send a test notification |
+| `GET /supervisor` (read), `GET /supervisor/runs?limit=20` (read), `POST /supervisor/run` (admin) | Auto AI Supervisor: state (mode, model, token budget, next run; never the key), run reports, run now (409 when off) |
 | `GET /audit` (admin) | who changed what |
 | `GET /whoami` (read) | role of the token; `POST /config/{key}/diff`, `GET /config/{key}/revisions/{id}/diff` (read): diff previews |
 
@@ -125,5 +134,5 @@ python -m unittest discover -s tests
 Standard library + FastAPI/uvicorn. The container runs as a non-root user; `/data` is the only writable path.
 
 ## Release
-Push a tag `vX.Y.Z`: GitHub Actions runs the tests and publishes `ghcr.io/<owner>/aiops-console:vX.Y.Z` (and `latest`).
+Push a tag `vX.Y.Z`: GitHub Actions runs the tests and publishes `ghcr.io/<owner>/aiops-console:vX.Y.Z` (and `latest`; a pre-release tag such as `v2.0.0-alpha.1` never moves `latest`).
 Make the package public once (GitHub → Packages → Package settings) so the host can pull it without credentials.

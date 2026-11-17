@@ -78,7 +78,7 @@ function diffEl(text) {
 const isAdmin = () => S.role === 'admin';
 
 // ---------------------------------------------------------------- shell
-const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['detectors', 'Detectors'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
+const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['detectors', 'Detectors'], ['supervisor', 'Supervisor'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
 async function loadVersion() {
@@ -116,7 +116,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -926,6 +926,32 @@ async function pageProposals() {
   renderShell([h('h2', {}, 'Proposals'),
     !isAdmin() ? h('div', { class: 'note' }, 'You are signed in with a read token: you can create proposals, an admin approves them.') : null,
     all.length ? all.map(card) : h('p', { class: 'muted' }, 'No proposals yet.')]);
+}
+
+// ---------------------------------------------------------------- supervisor (read-only periodic review by a separate model; reports only)
+async function pageSupervisor() {
+  const [st, runs] = await Promise.all([api('GET', '/api/v1/supervisor'), api('GET', '/api/v1/supervisor/runs?limit=20')]);
+  const runNow = async () => {
+    try { await api('POST', '/api/v1/supervisor/run'); toast('Run requested; it starts within 30 s.'); setTimeout(render, 8000); } catch (e) { toast(e.message, true); }
+  };
+  const pct = st.tokens_budget ? Math.min(100, Math.round(100 * st.tokens_today / st.tokens_budget)) : 0;
+  const runCard = (r) => h('div', { class: 'panel' },
+    h('div', { class: 'row' }, h('strong', {}, 'Run #' + r.id), h('span', { class: 'badge ' + (r.status === 'ok' ? 'b-up' : r.status === 'budget' ? 'b-unknown' : 'b-down') }, r.status),
+      h('span', { class: 'muted small grow' }, fmtTime(r.ts) + ' · ' + r.model + ' · ' + r.secs + ' s · ' + r.tokens + ' tokens')),
+    h('p', {}, r.report.summary || ''),
+    r.report.findings.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Severity', 'Finding', 'Detail'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, r.report.findings.map((f) => h('tr', {}, h('td', {}, sevBadge(f.severity)), h('td', {}, f.title), h('td', { class: 'small' }, f.detail))))) : null);
+  renderShell([
+    h('h2', {}, 'Supervisor'),
+    h('div', { class: 'note' }, 'Read-only review of the service state by a separate model. It never changes anything; in this version it only writes reports. Off by default.'),
+    h('div', { class: 'panel' },
+      h('div', { class: 'row' }, h('span', { class: 'badge ' + (st.mode === 'off' ? 'b-unknown' : 'b-up') }, st.mode),
+        h('span', { class: 'muted small grow' }, 'API: ' + st.api + ' · model: ' + st.model + ' · endpoint ' + (st.endpoint_configured ? 'set' : 'not set') + ' · key ' + (st.key_configured ? 'set' : 'not set')
+          + ' · every ' + st.interval_min + ' min' + (st.next_run_utc ? ' · next: ' + fmtTime(st.next_run_utc) : '')),
+        isAdmin() && st.mode !== 'off' ? h('button', { class: 'btn', disabled: st.running, onclick: runNow }, st.running ? 'Running...' : 'Run now') : null),
+      h('div', { class: 'muted small', style: 'margin-top:8px' }, 'Token budget today: ' + st.tokens_today + ' / ' + st.tokens_budget + ' (' + pct + '%). Change the mode and the model on the Settings page.')),
+    runs.length ? runs.map(runCard) : h('p', { class: 'muted' }, st.mode === 'off' ? 'The supervisor is off.' : 'No run yet.'),
+  ]);
 }
 
 // ---------------------------------------------------------------- history & audit
