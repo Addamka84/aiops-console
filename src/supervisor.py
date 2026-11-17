@@ -54,7 +54,7 @@ PROMPTS = {
                        'In "detail" quote the unsupported claim in one short sentence and say what the evidence actually shows. Most incidents are fine: zero findings is a good answer. Write the summary only as "Reviewed N incidents." with N = the number of items.',
     "coverage_gap": _BASE + 'Task "coverage_gap": the input "items" are groups of high-severity log lines (journald PRIORITY 0-3, syslog severity emerg/alert/crit/err) from the last 24 hours that NO alert covered in the last 7 days (covered groups are omitted; "covered_count" says how many). '
                            'Each item has ref, source, host, ident, hits, a redacted sample line and a ready LogsQL "filter" for the whole group. '
-                           'Decide which groups an operator should be alerted about (disk / SMART / RAID / filesystem failures, hardware errors, service crashes, authentication or security problems, out-of-memory, repeated restarts) and which are harmless chatter (periodic cron or status lines, DHCPv6 / network-wait messages, one-off wifi driver lines). '
+                           'Groups that match a known issue, a snooze or a noise rule are already omitted: the operator knows about them. Decide which groups an operator should be alerted about (disk / SMART / RAID / filesystem failures, hardware errors, service crashes, authentication or security problems, out-of-memory, repeated restarts) and which are harmless chatter (periodic cron or status lines, DHCPv6 / network-wait messages, one-off wifi driver lines). '
                            'For each group that deserves an alert write one finding: "task": "coverage_gap", "refs": [the item ref], "regex": "", severity = how urgent the missing alert is, title and detail (what it is, why it matters, how many hits). '
                            'Set "query" to a LogsQL FILTER only (no pipes, no _time) that matches those lines: start from the item "filter" and, if the sample shows a distinctive phrase, narrow it with that phrase in double quotes (e.g. host:=homenas2 appname:=smartd "FAILED SMART self-check"); keep the host and source fields. '
                            'Priorities: repeating disk / SMART / RAID / hardware failure lines come first. A group with only 1-3 hits that is not clearly a hardware, disk or security failure is almost never worth an alert; do not speculate about attacks or outages that the sample does not show; a sample that is a normal operation (a login by an admin, a missing session for a dashboard page) is not a gap. '
@@ -343,7 +343,7 @@ def coverage_input(now=None):
         if not (_SAFE_VAL.match(host or "") and _SAFE_VAL.match(ident or "")):
             continue    # a hoszt/azonosito naplobol jon (nem megbizhato): a szuro csak biztonsagos ertekekbol epul
         sample = str(r.get("sample", ""))
-        if known is not None and known.classify_idx(f"{host} | {ident} | {sample}")[0] == "noise":
+        if known is not None and known.classify_idx(f"{host} | {ident} | {sample}")[0] != "keep":   # zaj, szuneteltetes VAGY ismert ugy: az ember mar tud rola (pl. "replacement pending")
             continue
         if any(host.lower() in m and ident.lower() in m for m in alerts):
             covered += 1

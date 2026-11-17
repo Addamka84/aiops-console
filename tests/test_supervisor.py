@@ -524,6 +524,20 @@ class CoverageInputTests(CoverageBase):
         inp, _ = supervisor.coverage_input()
         self.assertEqual({i["host"] for i in inp["items"]}, {"homenas2", "homesrv3"})
 
+    def test_known_issues_and_snoozes_are_skipped_too(self):
+        # az elo tapasztalat: a homenas2-sdb-smart "ismert ugy" (replacement pending) mellett a smartd-sorokra a riasztas ertelmetlen
+        # (az aiops az ismert ugy miatt kihagyna az incidenst), ezert a lefedettsegi feladat sem javasolhat ra detektort
+        class K:
+            def classify_idx(self, text, now=None):
+                if "smartd" in text:
+                    return ("known", {"id": "homenas2-sdb-smart"})
+                if "publish_metrics" in text:
+                    return ("snooze", {"until": None})
+                return ("keep", None)
+        supervisor.GET_KNOWN = lambda: K()
+        inp, _ = supervisor.coverage_input()
+        self.assertEqual({i["host"] for i in inp["items"]}, {"homesrv3"})
+
 
 class CoverageGuardTests(CoverageBase):
     def finding(self, ref, query, **kw):
