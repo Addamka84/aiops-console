@@ -38,10 +38,17 @@ PROMPTS = {
     "noise": _BASE + 'Task "noise": the input "items" are new-pattern / rate-spike findings of the novelty detector (ref, host, ident, level, hits, template; numbers in templates are <N>). '
               'Pick patterns that are clearly harmless, repetitive background chatter (routine info/debug messages, periodic status, cloud polling) and suggest ONE regex per group of similar patterns. '
               'Set "task" to "noise", "refs" to the refs of the items the regex is meant to silence, and "regex" to a SIMPLE Python regular expression (a literal part of the message, escaped; no nested quantifiers, no ".*" alone). '
+              'Anchor the regex to the source: include a distinctive part of the logger / component / service name from the template (e.g. "dreame_vacuum\\.dreame\\.map\\] Request map data") so it cannot match other services; a bare generic phrase such as "GET /status" is too broad. '
               'NEVER suggest silencing anything that looks like an error, failure, warning about data/disk/security, crash or out-of-memory. When unsure, do not suggest it. Severity "info".',
-    "incident_review": _BASE + 'Task "incident_review": the input "items" are recent AI-triaged incidents (ref, alert, summary, correlated_alerts, root_hypothesis, root_confidence, ungrounded_hosts, issues with evidence and likely_cause). '
-                       'For each incident that looks weak, wrong or unsupported (the likely cause is not backed by the evidence, hosts that are not in the evidence, an overconfident root cause, a wrong severity), write one finding: "task": "incident_review", "refs": [that incident ref], "regex": "". '
-                       'Severity = how much the operator should distrust that incident (medium or higher only for clear problems). Do not write findings for incidents that are fine; mention in "summary" how many you reviewed.',
+    "incident_review": _BASE + 'Task "incident_review": the input "items" are recent AI-triaged incidents (ref, alert, summary, correlated_alerts, root_hypothesis, root_confidence, ungrounded_hosts, issues with evidence and likely_cause); read the "notes" field first. '
+                       'You judge whether the incident analysis is SUPPORTED BY ITS OWN EVIDENCE. Write a finding only for a real defect: '
+                       '(a) a likely_cause or root cause stated as a fact that the evidence text does not show (speculation presented as certainty), '
+                       '(b) host names in the issue that do not appear in its evidence, or ungrounded_hosts above 0, '
+                       '(c) a severity clearly out of line with the evidence (e.g. "critical" for a single recovered warning), '
+                       '(d) a root_hypothesis that contradicts the evidence. '
+                       'An EMPTY root_hypothesis / root_confidence is NORMAL (a single alert, nothing correlated): never report it, and never report that an incident "lacks" a root cause. Do not criticise style, wording or missing extra diagnostics. '
+                       'Set "task": "incident_review", "refs": [that incident ref], "regex": "". Severity of your finding: "low" = mild overreach, "medium" = a cause stated as fact without support, "high" = the analysis is contradicted by its evidence or names hosts that are not in it. '
+                       'In "detail" quote the unsupported claim in one short sentence and say what the evidence actually shows. Most incidents are fine: zero findings is a good answer. Write the summary only as "Reviewed N incidents." with N = the number of items.',
 }
 SYSTEM_PROMPT = PROMPTS["overview"]   # (visszafele kompatibilis nev)
 
@@ -298,7 +305,10 @@ def incident_input(now=None):
                       "correlated_alerts": hd.get("correlated_alerts", "1"), "root_hypothesis": str(hd.get("root_hypothesis", "")),
                       "root_confidence": hd.get("root_confidence", ""), "ungrounded_hosts": hd.get("ungrounded_hosts", "0"),
                       "all_clear": hd.get("all_clear", ""), "issues": by_parent.get(ref, [])[:6]})
-    return {"task": "incident_review", "items": items}, {i["ref"] for i in items}
+    notes = ["An empty root_hypothesis / root_confidence is normal: the root cause comes from the topology graph and only exists when several related alerts were correlated.",
+             "root_confidence belongs to the topology correlation, not to the model.",
+             "ungrounded_hosts is the number of host names the model produced that were not in its input (already removed from the issue)."]
+    return {"task": "incident_review", "notes": notes, "items": items}, {i["ref"] for i in items}
 
 
 # ---------------------------------------------------------------- zaj-javaslat vedelmei (determinisztikus; a modellnek nem hiszunk)
@@ -320,6 +330,10 @@ def check_noise_regex(rx, ref_templates, all_findings):
         c = re.compile(rx)
     except re.error as e:
         return f"invalid regex ({e})"
+    if "(" not in rx and "[" not in rx:   # felso szintu alternativak: mindegyik legyen eleg specifikus (pl. egy "GET /health" tag mas szolgaltatasokat is elnyelne)
+        alts = re.split(r"(?<!\\)\|", rx)
+        if len(alts) > 1 and any(len(a) < 14 for a in alts):
+            return "an alternative is too short (too broad)"
     for can in _CANARIES:
         if c.search(can):
             return "matches generic error text (too broad)"

@@ -326,6 +326,7 @@ class NoiseTests(Base):
             "error-like referenced pattern": ([self.ids[ERR]], r"homeassistant\.components\.shelly\] Timeout fetching"),
             "smart attribute": ([self.ids[CRIT]], r"smartd Device: /dev/sdb Failed SMART usage"),
             "matches generic error text": ([self.ids[EXPORT]], r"(?i)error|Exporting image"),
+            "short alternative": ([self.ids[EXPORT]], r"Exporting image .* to /data|GET /health"),
         }
         m = self.model_returning([self.f(refs, rx, title=name) for name, (refs, rx) in cases.items()])
         supervisor.run_once(self.store, model=m)
@@ -381,6 +382,28 @@ class NoiseTests(Base):
 HEAD = {"_time": "2026-11-17T03:00:00Z", "id": "incident-2026-11-17T03:00:00Z", "alert": "[FIRING] X", "_msg": "[AI incident] summary", "correlated_alerts": "1",
         "root_hypothesis": "nihil", "root_confidence": "1.0", "ungrounded_hosts": "2", "all_clear": "false"}
 ISSUE = {"parent": "incident-2026-11-17T03:00:00Z", "title": "T", "severity": "high", "hosts": "homesrv", "evidence": "ev", "likely_cause": "lc"}
+
+
+class PromptTests(unittest.TestCase):
+    """A hangolt promptok kulcselemei (az elo merest a scripts-mappa nelkul, a regresszio ellen)."""
+
+    def test_incident_review_prompt_does_not_punish_empty_root(self):
+        p = supervisor.PROMPTS["incident_review"]
+        self.assertIn("EMPTY root_hypothesis", p)
+        self.assertIn("never report that an incident", p)
+        self.assertIn("zero findings is a good answer", p)
+
+    def test_noise_prompt_asks_for_anchored_regex(self):
+        self.assertIn("Anchor the regex to the source", supervisor.PROMPTS["noise"])
+
+    def test_incident_input_explains_empty_root(self):
+        orig = aiops.vl_query
+        aiops.vl_query = lambda q, timeout=None: []
+        try:
+            inp, _ = supervisor.incident_input()
+        finally:
+            aiops.vl_query = orig
+        self.assertTrue(any("empty root_hypothesis" in n for n in inp["notes"]))
 
 
 class IncidentReviewTests(Base):
