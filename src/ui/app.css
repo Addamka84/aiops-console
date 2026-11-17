@@ -20,14 +20,20 @@
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 a { color: var(--accent); }
 header { background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
-.bar { max-width: 1100px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.brand { font-weight: 650; letter-spacing: .2px; }
+.bar { margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 14px; height: 52px; box-sizing: border-box; }
+.bar .grow { flex: 1; min-width: 0; }
+.brand { font-weight: 650; letter-spacing: .2px; white-space: nowrap; }
 .ver { font-weight: 400; font-size: 12px; margin-left: 4px; }
-nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
-nav button { background: none; border: 0; color: var(--muted); padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
-nav button:hover { background: var(--bg); }
-nav button.on { color: var(--text); background: var(--bg); font-weight: 600; }
-main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+/* oldalsav (szelesen) / egysoros gorgetheto sav (keskenyen) */
+.layout { display: flex; max-width: 1360px; margin: 0 auto; align-items: flex-start; }
+nav.side { width: 212px; flex: none; padding: 12px 10px 24px 14px; position: sticky; top: 52px; max-height: calc(100vh - 52px); overflow-y: auto; box-sizing: border-box; }
+nav.side .grp { font-size: 11px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); padding: 14px 10px 4px; }
+nav.side .grp:first-child { padding-top: 4px; }
+nav.side button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; background: none; border: 0; color: var(--muted); padding: 7px 10px; border-radius: 7px; cursor: pointer; font: inherit; }
+nav.side button:hover { background: var(--panel); color: var(--text); }
+nav.side button.on { color: var(--text); background: var(--panel); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+nav.side .cnt { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 600; }
+main { flex: 1; min-width: 0; max-width: 1100px; margin: 0; padding: 16px; box-sizing: border-box; }
 h2 { font-size: 18px; margin: 0 0 10px; }
 h3 { font-size: 15px; margin: 18px 0 8px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; overflow-x: auto; }
@@ -78,7 +84,14 @@ tr.unused td { opacity: .6; }
 #toast div { background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; max-width: 360px; }
 #toast div.bad { background: var(--bad); color: #fff; }
 .login { max-width: 420px; margin: 12vh auto; }
-@media (max-width: 640px) { .bar { padding: 8px 12px; } main { padding: 12px; } }
+@media (max-width: 900px) {
+  .layout { display: block; }
+  nav.side { position: static; width: auto; max-height: none; display: flex; gap: 4px; overflow-x: auto; white-space: nowrap; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--line); -webkit-overflow-scrolling: touch; }
+  nav.side .grp { display: none; }
+  nav.side button { width: auto; flex: none; }
+  nav.side button.on { box-shadow: inset 0 -3px 0 var(--accent); }
+}
+@media (max-width: 640px) { .bar { padding: 8px 12px; gap: 8px; } .ver { display: none; } main { padding: 12px; } }
 
 /* statistics */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }

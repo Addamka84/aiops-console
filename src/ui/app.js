@@ -78,7 +78,10 @@ function diffEl(text) {
 const isAdmin = () => S.role === 'admin';
 
 // ---------------------------------------------------------------- shell
-const TABS = [['status', 'Status'], ['known', 'Noise & known issues'], ['topology', 'Topology'], ['detectors', 'Detectors'], ['supervisor', 'Supervisor'], ['settings', 'Settings'], ['proposals', 'Proposals'], ['history', 'History']];
+// [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
+const TABS = [['status', 'Status', 'Monitor'], ['history', 'History', 'Monitor'],
+  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['settings', 'Settings', 'Configure'],
+  ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
 async function loadVersion() {
@@ -89,14 +92,20 @@ const verEl = () => (S.version ? h('span', { class: 'ver muted', title: 'aiops-c
 
 function renderShell(content) {
   const app = document.getElementById('app');
+  const items = [];
+  let grp = null;
+  for (const [id, label, g] of TABS) {
+    if (g !== grp) { grp = g; items.push(h('div', { class: 'grp' }, g)); }
+    items.push(h('button', { class: S.tab === id ? 'on' : '', onclick: () => go(id), 'aria-current': S.tab === id ? 'page' : null },
+      h('span', {}, label), id === 'proposals' && S.proposalsPending ? h('span', { class: 'cnt', title: 'Pending proposals' }, S.proposalsPending) : null));
+  }
   app.replaceChildren(
     h('header', {}, h('div', { class: 'bar' },
       h('span', { class: 'brand' }, 'aiops console ', verEl()),
-      h('nav', {}, TABS.map(([id, label]) => h('button', { class: S.tab === id ? 'on' : '', onclick: () => go(id) },
-        label, id === 'proposals' && S.proposalsPending ? ' (' + S.proposalsPending + ')' : ''))),
+      h('span', { class: 'grow' }),
       h('span', { class: 'badge ' + (isAdmin() ? 'b-up' : 'b-unknown'), title: S.actor }, S.role),
       h('button', { class: 'btn', onclick: signOut }, 'Sign out'))),
-    h('main', {}, content));
+    h('div', { class: 'layout' }, h('nav', { class: 'side', 'aria-label': 'Sections' }, items), h('main', {}, content)));
 }
 function go(tab) {
   S.tab = tab; storage.set('tab', tab);

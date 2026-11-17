@@ -465,6 +465,78 @@ class MultiTaskTests(Base):
         self.assertEqual(supervisor._enabled_tasks(), list(supervisor.TASKS))
 
 
+def fake_ollama(calls, content=None, done_reason="stop", status=200):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            calls.append((self.path, body))
+            obj = {"message": {"content": json.dumps(content or {"summary": "ok", "findings": []})}, "done_reason": done_reason,
+                   "prompt_eval_count": 700, "eval_count": 90}
+            data = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+class OllamaApiTests(Base):
+    def setUp(self):
+        super().setUp()
+        aiops.CFG.update(SUPERVISOR_API="ollama", SUPERVISOR_MODEL="gpt-oss:20b", SUPERVISOR_TASKS=["overview"], SUPERVISOR_NUM_CTX=16384,
+                         SUPERVISOR_MAX_OUT_TOKENS=6000)
+
+    def go(self, **kw):
+        calls = []
+        srv, url = fake_ollama(calls, **kw)
+        self.addCleanup(srv.shutdown)
+        aiops.CFG["SUPERVISOR_URL"] = url
+        supervisor.run_once(self.store)
+        return calls, self.store.sup_runs()[0]
+
+    def test_context_and_limits_are_sent(self):
+        aiops.CFG["SUPERVISOR_REASONING"] = "low"
+        calls, run = self.go()
+        path, body = calls[0]
+        self.assertEqual(path, "/api/chat")
+        self.assertEqual((body["options"]["num_ctx"], body["options"]["num_predict"], body["think"], body["stream"]), (16384, 6000, "low", False))
+        self.assertIn("properties", body["format"])
+        self.assertEqual((run["status"], run["tokens"]), ("ok", 790))
+
+    def test_think_only_when_set_and_truncation_is_an_error(self):
+        calls, run = self.go(done_reason="length")
+        self.assertNotIn("think", calls[0][1])
+        self.assertEqual(run["status"], "error")
+        self.assertIn("truncated", run["report"]["summary"])
+
+    def test_http_error(self):
+        _, run = self.go(status=500)
+        self.assertEqual(run["status"], "error")
+
+
+class SummaryTests(Base):
+    def test_noise_and_incident_summaries_are_deterministic(self):
+        aiops.CFG["SUPERVISOR_TASKS"] = ["noise"]
+        add_findings(self.store, [{"tmpl": EXPORT, "level": "info"}])
+        m = FakeModel(content={"summary": "The system crashed because of a Waze failure.", "findings": []})
+        supervisor.run_once(self.store, model=m)
+        s = self.store.sup_runs()[0]["report"]["summary"]
+        self.assertNotIn("crashed", s)
+        self.assertIn("Noise: reviewed 1 open findings", s)
+
+    def test_overview_snapshot_explains_the_numbers(self):
+        snap = supervisor.snapshot(self.store)
+        self.assertIn("known_patterns_baseline", snap["novelty"])
+        self.assertNotIn("patterns", snap["novelty"])
+        self.assertTrue(any("NOT a number of findings" in n for n in snap["notes"]))
+
+
 class SettingsTests(unittest.TestCase):
     def test_validation(self):
         ok, errs = settings.validate({"SUPERVISOR_MODE": "report", "SUPERVISOR_URL": "https://gpu.example:8000/", "SUPERVISOR_MODEL": "qwen-big",

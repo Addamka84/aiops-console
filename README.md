@@ -140,3 +140,8 @@ Standard library + FastAPI/uvicorn. The container runs as a non-root user; `/dat
 ## Release
 Push a tag `vX.Y.Z`: GitHub Actions runs the tests and publishes `ghcr.io/<owner>/aiops-console:vX.Y.Z` (and `latest`; a pre-release tag such as `v2.0.0-alpha.1` never moves `latest`).
 Make the package public once (GitHub → Packages → Package settings) so the host can pull it without credentials.
+
+### Supervisor with Ollama
+Use `SUPERVISOR_API=ollama` (native `/api/chat`) for Ollama: the OpenAI-compatible `/v1` endpoint cannot set the context window and Ollama silently uses the
+model's default (often 4096 tokens), which truncates the input and leaves no room for the output. The native API sends `SUPERVISOR_NUM_CTX` (use 16384 or more) and
+`SUPERVISOR_REASONING` as `think` (`low` for gpt-oss). Check the loaded context with `GET /api/ps` (`context_length`).

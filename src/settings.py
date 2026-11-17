@@ -48,7 +48,7 @@ SPEC = {
     "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
     "SUPERVISOR_MODE": {"type": "choice", "choices": ["off", "report"], "desc": "Auto AI Supervisor (read-only periodic review by a separate model): off | report (writes a report; never changes anything)."},
     "SUPERVISOR_INTERVAL_MIN": {"type": "int", "min": 15, "max": 10080, "desc": "How often the supervisor runs (minutes)."},
-    "SUPERVISOR_API": {"type": "choice", "choices": ["openai", "mock"], "desc": "Supervisor model API: openai (OpenAI-compatible) | mock (deterministic, no model; for tests and demos). The API key is the environment variable SUPERVISOR_KEY only."},
+    "SUPERVISOR_API": {"type": "choice", "choices": ["openai", "ollama", "mock"], "desc": "Supervisor model API: openai (OpenAI-compatible: vLLM, NIM, ...) | ollama (native /api/chat; sets the context window, recommended for Ollama: its /v1 endpoint silently uses the model's small default context) | mock (deterministic, no model; for tests and demos). The API key is the environment variable SUPERVISOR_KEY only."},
     "SUPERVISOR_URL": {"type": "url0", "desc": "Supervisor model endpoint (http(s)://host:port, no path); empty = not configured. Separate from the triage model."},
     "SUPERVISOR_MODEL": {"type": "str0", "desc": "Supervisor model name (separate from MODEL)."},
     "SUPERVISOR_NUM_CTX": {"type": "int", "min": 2048, "max": 1048576, "desc": "Largest supervisor input (tokens; estimated as 4 characters per token)."},
