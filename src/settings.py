@@ -53,7 +53,7 @@ SPEC = {
     "SUPERVISOR_MODEL": {"type": "str0", "desc": "Supervisor model name (separate from MODEL)."},
     "SUPERVISOR_NUM_CTX": {"type": "int", "min": 2048, "max": 1048576, "desc": "Largest supervisor input (tokens; estimated as 4 characters per token)."},
     "SUPERVISOR_TIMEOUT_S": {"type": "int", "min": 10, "max": 3600, "desc": "Maximum duration of one supervisor model call (s)."},
-    "SUPERVISOR_TASKS": {"type": "tasks", "desc": "Supervisor tasks per run (comma separated): overview (state snapshot), noise (suggests noise regexes for open novelty findings; validated, report only), incident_review (reviews recent AI incidents)."},
+    "SUPERVISOR_TASKS": {"type": "tasks", "desc": "Supervisor tasks per run (comma separated): overview (state snapshot), noise (suggests noise regexes for open novelty findings; validated, report only), incident_review (reviews recent AI incidents), coverage_gap (high-severity log groups without an alert; validated filter + backtest + disabled detector draft, report only)."},
     "SUPERVISOR_MAX_OUT_TOKENS": {"type": "int", "min": 256, "max": 64000, "desc": "Largest supervisor model output (tokens). A reasoning model (e.g. gpt-oss) also spends tokens on thinking: raise it if runs fail with 'response truncated'."},
     "SUPERVISOR_REASONING": {"type": "choice", "choices": ["", "low", "medium", "high"], "desc": "reasoning_effort sent to the supervisor model (empty = not sent). 'low' makes reasoning models (gpt-oss) faster and cheaper; leave empty for servers that do not know the parameter."},
     "SUPERVISOR_MAX_ITEMS": {"type": "int", "min": 10, "max": 300, "desc": "Largest number of items (novelty findings) one supervisor task reads; incidents: a quarter of it."},

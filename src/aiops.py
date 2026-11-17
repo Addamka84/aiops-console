@@ -96,12 +96,12 @@ CFG = {
     "SUPERVISOR_TIMEOUT_S": _env_int("SUPERVISOR_TIMEOUT_S", 300),
     "SUPERVISOR_MAX_TOKENS_PER_DAY": _env_int("SUPERVISOR_MAX_TOKENS_PER_DAY", 400000),  # koltsegkeret (UTC nap); tullepes utan modellhivas nelkuli jelentes
     "SUPERVISOR_KEY": os.environ.get("SUPERVISOR_KEY", "").strip(),
-    "SUPERVISOR_TASKS": [t.strip() for t in os.environ.get("SUPERVISOR_TASKS", "overview,noise,incident_review").split(",") if t.strip()],
+    "SUPERVISOR_TASKS": [t.strip() for t in os.environ.get("SUPERVISOR_TASKS", "overview,noise,incident_review,coverage_gap").split(",") if t.strip()],
     "SUPERVISOR_MAX_OUT_TOKENS": _env_int("SUPERVISOR_MAX_OUT_TOKENS", 4000),    # a modell kimenetenek felso hatara (gondolkodo modellnel a gondolkodas is beleszamit)
     "SUPERVISOR_REASONING": os.environ.get("SUPERVISOR_REASONING", "").strip(),  # "" | low | medium | high (reasoning_effort; ures = nem kuldjuk)
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.5"
+__version__ = "2.0.0-alpha.6"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1370,6 +1370,7 @@ def service_loop(get_known, store=None):
         import detectors
         threading.Thread(target=detectors.run_loop, daemon=True, name="detectors").start()
         import supervisor
+        supervisor.GET_KNOWN = get_known
         threading.Thread(target=supervisor.run_loop, args=(store,), daemon=True, name="supervisor").start()
     log(f"aiops indul: modell {CFG['MODEL']}, vegpontok {CFG['OLLAMA_URLS']}, osszefoglalo {CFG['DIGEST_UTC']} UTC")
     last_poll = 0.0

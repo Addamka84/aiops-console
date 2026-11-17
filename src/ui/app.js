@@ -952,7 +952,11 @@ async function pageSupervisor() {
     h('div', { class: 'muted small' }, Object.entries(r.report.tasks || {}).map(([n, t]) => n + ': ' + t.status + (t.items !== undefined ? ' (' + t.items + ' items, ' + t.findings + ' findings, ' + t.rejected + ' rejected)' : '') + (t.error ? ' - ' + t.error : '')).join(' · ')),
     r.report.findings.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Task', 'Severity', 'Finding', 'Detail'].map((x) => h('th', {}, x)))),
       h('tbody', {}, r.report.findings.map((f) => h('tr', {}, h('td', { class: 'mono small' }, f.task), h('td', {}, sevBadge(f.severity)), h('td', {}, f.title),
-        h('td', { class: 'small' }, f.detail, f.regex ? h('div', {}, 'Suggested noise regex: ', h('code', {}, f.regex)) : null, f.refs && f.refs.length ? h('div', { class: 'muted' }, 'refs: ' + f.refs.join(', ')) : null))))) : null,
+        h('td', { class: 'small' }, f.detail, f.regex ? h('div', {}, 'Suggested noise regex: ', h('code', {}, f.regex)) : null,
+          f.query ? h('div', {}, 'Suggested filter: ', h('code', {}, f.query)) : null,
+          f.backtest ? h('div', { class: 'muted' }, 'Backtest ' + (f.backtest.hours / 24) + ' d: ' + f.backtest.firings + ' firing(s), ' + f.backtest.total + ' matching line(s)') : null,
+          f.draft ? h('details', {}, h('summary', { class: 'muted' }, 'Detector draft (disabled, not applied)'), h('pre', { class: 'diff' }, JSON.stringify(f.draft, null, 1))) : null,
+          f.refs && f.refs.length ? h('div', { class: 'muted' }, 'refs: ' + f.refs.join(', ')) : null))))) : null,
     (r.report.rejected || []).length ? h('details', {}, h('summary', { class: 'muted small' }, (r.report.rejected.length) + ' suggestion(s) rejected by the guards'),
       h('ul', { class: 'small' }, r.report.rejected.map((x) => h('li', {}, x.title + ': ' + x.reason + (x.regex ? ' (' + x.regex + ')' : ''))))) : null);
   renderShell([

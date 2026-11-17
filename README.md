@@ -145,3 +145,10 @@ Make the package public once (GitHub → Packages → Package settings) so the h
 Use `SUPERVISOR_API=ollama` (native `/api/chat`) for Ollama: the OpenAI-compatible `/v1` endpoint cannot set the context window and Ollama silently uses the
 model's default (often 4096 tokens), which truncates the input and leaves no room for the output. The native API sends `SUPERVISOR_NUM_CTX` (use 16384 or more) and
 `SUPERVISOR_REASONING` as `think` (`low` for gpt-oss). Check the loaded context with `GET /api/ps` (`context_length`).
+
+### Supervisor: coverage gaps
+The `coverage_gap` task looks for high-severity log lines of the last 24 h (journald PRIORITY 0-3, syslog severity emerg/alert/crit/err) that no alert covered in the
+last 7 days (known noise is skipped; host and source values from logs are only used when they are safe identifiers). The model picks the groups that deserve an alert
+and proposes a LogsQL **filter**; deterministic guards check it (filter-only syntax, it must keep the group's host and source, a 7-day backtest on VictoriaLogs: it
+must match lines and would fire at most 14 times with a 24 h cooldown). Each accepted finding carries the backtest result and a **disabled detector draft** that is
+only shown, never applied. Mode `report` only; turning drafts into proposals is a later phase (admin approval stays).
