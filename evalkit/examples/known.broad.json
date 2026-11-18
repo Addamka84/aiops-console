@@ -1,0 +1,14 @@
+{
+  "context": [],
+  "noise": [
+    "\\| logicmonitor \\| Agent heartbeat received",
+    "\\| dynatrace \\| OneAgent heartbeat OK",
+    "\\| logicmonitor \\| WARN - CPU utilization .* auto-clears",
+    "\\| solarwinds \\| Node response time .* ms \\(warning\\)",
+    "\\| vrops \\| Symptom: VM CPU ready .* \\(transient\\)",
+    "\\| dynatrace \\| Maintenance window active",
+    "heartbeat"
+  ],
+  "known_issues": [],
+  "snoozes": []
+}

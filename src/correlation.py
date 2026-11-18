@@ -61,31 +61,47 @@ def resolve_cis(topo, texts, limit=6):
     return topo.match([t for t in texts if t], limit=limit)
 
 
-def relation(topo, a_cis, b_cis, hub_fanout=25):
-    """Ket elem (eszkozlistak) kozotti kapcsolat erőssege 0..1."""
+def new_cache():
+    """A relation() gyorsitotara egy klaszterezesi futashoz: az 'up' bejaras (topo_up) es a hub-szamitas eszkozonkent egyszer."""
+    return {"up": {}, "hub": {}}
+
+
+def relation(topo, a_cis, b_cis, hub_fanout=25, cache=None):
+    """Ket elem (eszkozlistak) kozotti kapcsolat erőssege 0..1. A cache (new_cache()) csak gyorsit: az eredmeny ugyanaz."""
+    cache = cache if cache is not None else new_cache()
+
+    def up(ci):
+        if ci not in cache["up"]:
+            cache["up"][ci] = topo_up(topo, ci)
+        return cache["up"][ci]
+
+    def hub(ci):
+        if ci not in cache["hub"]:
+            cache["hub"][ci] = _hub(topo, ci, hub_fanout)
+        return cache["hub"][ci]
     best = 0.0
     for a in a_cis:
-        up_a = topo_up(topo, a)
+        up_a = up(a)
         for b in b_cis:
             if a == b:
                 return 1.0
             d = up_a.get(b)
             if d is not None:
                 best = max(best, 0.95 - 0.1 * d)
-            d2 = topo_up(topo, b).get(a)
+            d2 = up(b).get(a)
             if d2 is not None:
                 best = max(best, 0.95 - 0.1 * d2)
             if best < 0.6:
-                up_b = topo_up(topo, b)
+                up_b = up(b)
                 for anc, da in up_a.items():
                     db = up_b.get(anc)
-                    if db is not None and not _hub(topo, anc, hub_fanout):
+                    if db is not None and not hub(anc):
                         best = max(best, 0.6 - 0.1 * (da + db - 2))
     return best
 
 
-def cluster(topo, items, window_s=600, hub_fanout=25):
-    """items: [{"ts", "cis", ...}] -> list of index lists (egy lista = egy incidens). Idoben (window_s) es a topologiaban rokon elemek egyutt."""
+def cluster_pairwise(topo, items, window_s=600, hub_fanout=25):
+    """REFERENCIA (a regi, paronkenti O(n^2) algoritmus): a tesztek ezzel igazoljak, hogy a gyors cluster() azonos eredmenyt ad."""
     n = len(items)
     parent = list(range(n))
 
@@ -94,12 +110,67 @@ def cluster(topo, items, window_s=600, hub_fanout=25):
             parent[i] = parent[parent[i]]
             i = parent[i]
         return i
+    cache = new_cache()
     for i in range(n):
         for j in range(i + 1, n):
             if abs(items[i]["ts"] - items[j]["ts"]) > window_s or not items[i]["cis"] or not items[j]["cis"]:
                 continue
-            if relation(topo, items[i]["cis"], items[j]["cis"], hub_fanout) >= JOIN_TH:
+            if relation(topo, items[i]["cis"], items[j]["cis"], hub_fanout, cache) >= JOIN_TH:
                 parent[find(i)] = find(j)
+    groups = defaultdict(list)
+    for i in range(n):
+        groups[find(i)].append(i)
+    return sorted(groups.values(), key=lambda g: g[0])
+
+
+def cluster(topo, items, window_s=600, hub_fanout=25):
+    """items: [{"ts", "cis", ...}] -> list of index lists (egy lista = egy incidens). Idoben (window_s) es a topologiaban rokon elemek egyutt.
+    Gyors valtozat (az eredmeny azonos a cluster_pairwise()-szel): a kapcsolat csak az eszkozlistak HALMAZAITOL fugg, ezert az azonos halmazu elemeket egyben
+    kezeli: a relation() csak a KULONBOZO halmaz-parokra fut (gyorsitotarral), az idoablakos osszevonast pedig rendezett lista + ketmutatos soprés
+    vegzi (O(n) egy rokon halmaz-parra). Az eseményvihar (sok elem egy ablakban, kevés kulonbozo eszkozhalmaz) igy nem negyzetes."""
+    n = len(items)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+    by_set = defaultdict(list)
+    for i, it in enumerate(items):
+        if it["cis"]:
+            by_set[frozenset(it["cis"])].append(i)
+    keys = sorted(by_set, key=lambda k: sorted(k))
+    for k in keys:
+        by_set[k].sort(key=lambda i: items[i]["ts"])
+        idx = by_set[k]
+        for x, y in zip(idx, idx[1:]):                       # azonos halmaz: relation = 1.0, az ablakon beluli szomszedok lancolodnak
+            if items[y]["ts"] - items[x]["ts"] <= window_s:
+                union(x, y)
+    cache = new_cache()
+    for x in range(len(keys)):
+        for y in range(x + 1, len(keys)):
+            if relation(topo, sorted(keys[x]), sorted(keys[y]), hub_fanout, cache) < JOIN_TH:
+                continue
+            la, lb = by_set[keys[x]], by_set[keys[y]]
+            prev_r = 0
+            lo = 0
+            hi = 0
+            for ia in la:                                    # minden a-hoz a b-lista [lo, hi) tartomanya van az ablakon belul (mindket vege monoton)
+                ta = items[ia]["ts"]
+                while lo < len(lb) and items[lb[lo]]["ts"] < ta - window_s:
+                    lo += 1
+                hi = max(hi, lo)
+                while hi < len(lb) and items[lb[hi]]["ts"] <= ta + window_s:
+                    hi += 1
+                if lo < hi:
+                    union(ia, lb[lo])
+                    for k in range(max(lo, prev_r - 1), hi - 1):
+                        union(lb[k], lb[k + 1])
+                    prev_r = hi
     groups = defaultdict(list)
     for i in range(n):
         groups[find(i)].append(i)
