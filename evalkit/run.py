@@ -1,8 +1,9 @@
 """evalkit CLI.  Hasznalat (a stacks/aiops-console mappabol):
   python -m evalkit synth   --out DIR [--days 1] [--events-per-day 20000] [--storms-per-day 5] [--seed 1]
-  python -m evalkit report  --data DIR --known known.json [--window 600] [--settle 90] [--cooldown 1800] [--json out.json]
+  python -m evalkit report  --data DIR --known known.json [--window 600] [--settle 90] [--cooldown 1800] [--json out.json] [--html out.html [--candidate known2.json]]
   python -m evalkit compare --data DIR --base known.json --candidate known2.json
   python -m evalkit bench   --data DIR --known known.json [--sizes 100,200,400]
+  python -m evalkit import  --source dynatrace --input export.jsonl --out events.jsonl [--adapter ingest.json]   (tool export -> common schema, severity normalised)
 A kimenet angol (munkahelyi bemutatasra is szant); a kod es a megjegyzesek magyarok. Kilepesi kod: 0 = a kapu atment, 2 = a biztonsagi kapu elbukott.
 """
 import argparse
@@ -11,6 +12,7 @@ import os
 import sys
 
 from . import _env  # noqa: F401
+import ingest  # noqa: E402
 import topology  # noqa: E402
 from . import metrics, schema, synth  # noqa: E402
 
@@ -74,6 +76,18 @@ def cmd_report(a):
           f"incidents surfaced {gated['incidents_covered']}/{gated['truth_incidents']} | pair precision {gated['pair_precision']} | recall {gated['pair_recall']}"
           + (f" | root cause {groot['root_correct']}/{groot['storms']} ({groot['root_accuracy_pct']}%)" if groot else ""))
     print(f"== Throughput: {tp['events_per_sec']:,} events/s for classification ({tp['events']:,} events in {tp['secs']} s)")
+    if a.html:
+        from . import htmlreport
+        change = None
+        if a.candidate:
+            change = {"base": os.path.basename(a.known), "candidate": os.path.basename(a.candidate),
+                      "result": metrics.compare(ev, known, metrics.load_known(a.candidate))}
+        meta = f"{sup['events']:,} synthetic events | seed-deterministic | cooldown {a.cooldown}s, settle {a.settle}s, window {a.window}s | rules: {os.path.basename(a.known)}"
+        page = htmlreport.render({"sup": sup, "tpl": tpl, "cor": cor, "gated": gated, "root": root, "groot": groot, "tp": tp, "change": change,
+                                  "storm": htmlreport.storm_example(ev, topo, truth, gated) if truth else None, "title": a.title, "meta": meta})
+        with open(a.html, "w", encoding="utf-8") as f:
+            f.write(page)
+        print(f"== HTML report written: {a.html}")
     if a.json:
         for c in (cor, gated):
             c.pop("_clusters")
@@ -107,6 +121,45 @@ def cmd_bench(a):
     return 0
 
 
+def cmd_import(a):
+    """Egy eszkoz JSONL-exportja -> a kozos sema (events.jsonl): mezoleképezes + sulyossag-normalizalas. Cimke / incidens nincs: a biztonsagi
+    mutatok csak cimkezes utan szamolhatok. Az eredmeny helyi fajl; a munkahelyi adat nem kerulhet a repoba."""
+    doc = None
+    if a.adapter:
+        with open(a.adapter, encoding="utf-8") as f:
+            doc = json.load(f)
+    errs = ingest.validate(doc) if doc is not None else []
+    if errs:
+        print("invalid adapter file:\n  " + "\n  ".join(errs))
+        return 1
+    cfg = ingest.Config(doc)
+    out, skipped, unmapped, levels = [], {}, {}, {}
+    with open(a.input, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                ev, bad = ingest.to_event(json.loads(line), a.source, cfg)
+            except (ValueError, TypeError) as e:
+                key = str(e)[:60]
+                skipped[key] = skipped.get(key, 0) + 1
+                continue
+            out.append(ev)
+            levels[ev["level"]] = levels.get(ev["level"], 0) + 1
+            if bad is not None:
+                unmapped[bad] = unmapped.get(bad, 0) + 1
+    out.sort(key=lambda e: e["ts"])
+    schema.dump(out, a.out)
+    print(f"converted {len(out)} events, skipped {sum(skipped.values())} -> {a.out}")
+    print("   levels: " + ", ".join(f"{k} {levels[k]}" for k in schema.LEVELS if k in levels))
+    for k, v in sorted(skipped.items(), key=lambda x: -x[1])[:5]:
+        print(f"   skipped {v}x: {k}")
+    if unmapped:
+        print(f"   WARNING unmapped severity values (treated as '{cfg.sources.get(a.source, {}).get('default', ingest.FALLBACK_LEVEL)}'): "
+              + ", ".join(f"{k!r} x{v}" for k, v in sorted(unmapped.items(), key=lambda x: -x[1])[:10]) + "  -> add them to the adapter file")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="evalkit")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -124,7 +177,10 @@ def main(argv=None):
     r.add_argument("--settle", type=int, default=90)
     r.add_argument("--cooldown", type=int, default=1800)
     r.add_argument("--json")
-    c = sub.add_parser("compare")
+    r.add_argument("--html", help="self-contained one-page HTML report (for presentations)")
+    r.add_argument("--candidate", help="with --html: a candidate rule set to show the change gate on (e.g. examples/known.broad.json)")
+    r.add_argument("--title", default="AIOps evaluation report")
+    c =sub.add_parser("compare")
     c.add_argument("--data", required=True)
     c.add_argument("--base", required=True)
     c.add_argument("--candidate", required=True)
@@ -134,8 +190,13 @@ def main(argv=None):
     b.add_argument("--sizes", default="100,400,1600,6400,25000")
     b.add_argument("--cis-per-item", type=int, default=1, help="assets named per event; 3 = worst case (almost every event has a unique asset set)")
     b.add_argument("--repeat", type=int, default=1)
+    i = sub.add_parser("import")
+    i.add_argument("--source", required=True, help="tool code, e.g. dynatrace")
+    i.add_argument("--input", required=True, help="JSONL export of the tool")
+    i.add_argument("--out", required=True)
+    i.add_argument("--adapter", help="ingest document (JSON): severity map and field paths per tool")
     a = ap.parse_args(argv)
-    return {"synth": cmd_synth, "report": cmd_report, "compare": cmd_compare, "bench": cmd_bench}[a.cmd](a)
+    return {"synth": cmd_synth, "report": cmd_report, "compare": cmd_compare, "bench": cmd_bench, "import": cmd_import}[a.cmd](a)
 
 
 if __name__ == "__main__":

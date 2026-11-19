@@ -54,6 +54,9 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
   a new analysis every 30 minutes; the incident text says it flaps, every skipped firing is recorded (`pipeline:ai kind:alert_flapping`), and a critical alert is never skipped.
 - **Mute temporarily**: a *snooze* mutes a line for 1 hour to 90 days and expires by itself (no permanent rule to forget about).
   Expiry is checked when a line is classified, so no reload or cleanup job is involved; expired snoozes stay listed until removed.
+- **Severity normalisation**: the optional `ingest` config document maps each tool's severity scale (and field names) to `debug|info|warning|error|critical`; built-in defaults cover four common tools but are typical scales, not vendor specifications. An unmapped value counts as `error`, never silently `info`. Today only the flapping guard uses it (a critical alert is never skipped).
+- **Never-suppress list**: the `known` document may carry `must_keep`, sample lines of events that must never be muted (for example `esx-01 | dynatrace | Problem P-<N>: Host unavailable esx-01`).
+  A noise rule or snooze that matches any of them is rejected, whether it is typed by hand, proposed by the Supervisor or approved later.
 - **It watches itself**: every `HEARTBEAT_S` seconds (default 300) it writes a `pipeline:ai kind:heartbeat` event (with `llm_up`, queue length, version)
   so an alert rule can notice a dead service or an LLM that has been unreachable for a day. `GET /api/v1/health` is open for external monitors.
 - **Secrets stay in environment variables** (tokens, webhook URL); they are never written to the config store and the API never returns them.
@@ -182,7 +185,10 @@ like any other change; the Proposals page shows "will merge" / "conflict" and th
 
 ### Measurement kit (evalkit, v2.0.0-alpha.14+)
 `evalkit/` (not part of the image) measures the pipeline against a dataset with known ground truth: noise-rule **safety** (how many must-keep events would be suppressed, with a 95% upper bound), incident coverage, repeat-filter merging, grouping precision/recall, root-cause accuracy and throughput, plus a **change gate** (`compare`) that exits with code 2 when a candidate rule set would silence a must-keep event.
-`python -m evalkit synth|report|compare|bench` (see `evalkit/run.py`). The bundled dataset is synthetic; vendor-like message shapes are approximations, not vendor formats.
+`python -m evalkit synth|report|compare|bench|import` (`import` converts a tool's JSONL export to the common schema, see `evalkit/run.py`); `report --html out.html` writes a one-page, self-contained report for presentations (sample: `evalkit/examples/sample-report.html`). `demo/` is a Docker Compose environment that feeds the same synthetic data into a live console (see `demo/README.md`). The bundled dataset is synthetic; vendor-like message shapes are approximations, not vendor formats.
 
 ### Faster correlation (v2.0.0-alpha.15)
 `correlation.cluster()` no longer compares every pair of alerts: the relation depends only on the *set* of assets an alert names, so alerts with the same set are handled together and the relation is computed once per pair of distinct sets (cached); the time-window merge is a two-pointer sweep. The result is identical to the previous algorithm (kept as `cluster_pairwise()` for tests): 1,600 alerts in one window took 5.2 s, now 0.008 s; 25,000 take 0.13 s. Worst case (almost every alert a unique multi-asset set) remains quadratic.
+
+### must_keep, severity normalisation, demo (v2.0.0-alpha.16)
+`known.must_keep` lists sample lines that no noise rule or snooze may suppress (checked on every config write, proposal and approval). The `ingest` config document maps tool-specific severities and field names to one scale (`evalkit import` converts exports with it). `demo/` and `report --html` are new (see `demo/README.md`). Note: a `known` document with `must_keep` is rejected by v2.0.0-alpha.15 and earlier.

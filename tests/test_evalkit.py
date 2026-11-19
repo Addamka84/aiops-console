@@ -172,6 +172,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("Correlator", out)
 
+    def test_html_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.call(["synth", "--out", d, "--events-per-day", "4000", "--storms-per-day", "5", "--seed", "3"])
+            page_p = os.path.join(d, "r.html")
+            rc, out = self.call(["report", "--data", d, "--known", GOOD, "--candidate", BROAD, "--html", page_p, "--title", "T <x>"])
+            self.assertEqual(rc, 0, out)                                              # a jo szabalyokkal a kapu atmegy; a --candidate csak a bemutatohoz van
+            page = open(page_p, encoding="utf-8").read()
+            self.assertTrue(page.startswith("<!doctype html>"))
+            self.assertNotIn("<script", page)                                         # onallo, JavaScript nelkuli oldal
+            self.assertNotIn("http://", page)
+            self.assertNotIn("https://", page)                                        # nincs kulso eroforras
+            self.assertIn("T &lt;x&gt;", page)                                        # a cim escape-elve
+            self.assertIn("PASS", page)
+            self.assertIn("BLOCKED", page)                                            # a rossz jelolt szabaly blokkolva
+            self.assertIn("One event storm, end to end", page)
+            self.assertIn("Limits", page)
+            # nincs candidate -> nincs change-gate szakasz
+            rc, out = self.call(["report", "--data", d, "--known", GOOD, "--html", page_p])
+            self.assertNotIn("Change gate", open(page_p, encoding="utf-8").read())
+        # a biztonsagi kapu bukasa a jelentesben is latszik
+        with tempfile.TemporaryDirectory() as d:
+            self.call(["synth", "--out", d, "--events-per-day", "4000", "--storms-per-day", "5", "--seed", "3"])
+            page_p = os.path.join(d, "r.html")
+            rc, _ = self.call(["report", "--data", d, "--known", BROAD, "--html", page_p])
+            self.assertEqual(rc, 2)
+            self.assertIn("FAIL", open(page_p, encoding="utf-8").read())
+
 
 if __name__ == "__main__":
     unittest.main()

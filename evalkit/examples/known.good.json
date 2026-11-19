@@ -9,5 +9,12 @@
     "\\| dynatrace \\| Maintenance window active"
   ],
   "known_issues": [],
-  "snoozes": []
+  "snoozes": [],
+  "must_keep": [
+    "esx-01 | dynatrace | Problem P-<N>: Host unavailable esx-01",
+    "sw-core-1 | solarwinds | Node sw-core-1 is down",
+    "sw-acc-01 | logicmonitor | CRIT - sw-acc-01 ping loss 100%",
+    "esx-02 | vrops | Symptom: host not responding esx-02",
+    "vm-db-01 | logicmonitor | CRIT - Database replication broken, lag <N> s"
+  ]
 }

@@ -1,0 +1,81 @@
+# Demo: a konzol SZINTETIKUS adaton (nincs valos adat, nincs kulso szolgaltatas). Inditas a stacks/aiops-console/demo mappabol:
+#   docker compose up -d                       (VictoriaLogs + konzol + egyszeri betoltes: topologia, zajszabalyok, 3 nap mult)
+#   docker compose --profile live up -d        (+ folyamatos, elo esemenyfolyam)
+#   docker compose run --rm loader storm --root esx-02     (eseményvihar elo bemutatohoz)
+# UI: http://127.0.0.1:8095 (belepes: a CONSOLE_ADMIN_TOKEN). Az AI-triazs (incidens-osszefoglalo) modellt igenyel: OLLAMA_URLS.
+# A modell nelkul is mukodik: korrelacio, zajszuro, ujdonsag-figyeles, Supervisor (mock), javaslatok, naplo-grafikon.
+
+services:
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.53.0
+    command: ["-storageDataPath=/vlogs", "-retentionPeriod=30d"]
+    ports:
+      - "127.0.0.1:9428:9428"
+    volumes:
+      - vl_data:/vlogs
+    restart: unless-stopped
+
+  aiops:
+    image: ${AIOPS_IMAGE:-ghcr.io/addamka84/aiops-console:v2.0.0-alpha.16}
+    environment:
+      TZ: UTC
+      VL_URL: http://victorialogs:9428
+      OLLAMA_URLS: ${OLLAMA_URLS:-http://host.docker.internal:11434}
+      MODEL: ${MODEL:-qwen3.5:9b}
+      CONSOLE_ADMIN_TOKEN: ${CONSOLE_ADMIN_TOKEN:-demo-admin-token-0123456789-abcdefghij}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8095:8095"
+    volumes:
+      - aiops_data:/data
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    depends_on:
+      - victorialogs
+    restart: unless-stopped
+
+  # egyszeri: konzol-beallitas + mult feltoltese (ujrafuttatasa duplikalja a multat: 'docker compose down -v' utan inditsd ujra)
+  demo-init:
+    image: python:3.12-slim
+    working_dir: /app
+    environment: &loader_env
+      VL_URL: http://victorialogs:9428
+      CONSOLE_URL: http://aiops:8095
+      CONSOLE_ADMIN_TOKEN: ${CONSOLE_ADMIN_TOKEN:-demo-admin-token-0123456789-abcdefghij}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ..:/app:ro
+    command: ["sh", "-c", "python demo/loader.py setup && python demo/loader.py seed --days 3"]
+    depends_on:
+      - aiops
+    restart: "no"
+
+  loader:
+    image: python:3.12-slim
+    working_dir: /app
+    environment: *loader_env
+    volumes:
+      - ..:/app:ro
+    entrypoint: ["python", "demo/loader.py"]
+    profiles: ["tools"]
+
+  live:
+    image: python:3.12-slim
+    working_dir: /app
+    environment: *loader_env
+    volumes:
+      - ..:/app:ro
+    command: ["python", "demo/loader.py", "live"]
+    depends_on:
+      - demo-init
+    profiles: ["live"]
+    restart: unless-stopped
+
+volumes:
+  vl_data:
+  aiops_data:

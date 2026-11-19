@@ -413,8 +413,9 @@ def _tmatch(c, template):
     return bool(c.search(template) or c.search(template.replace("<N>", "123")))
 
 
-def check_noise_regex(rx, ref_templates, all_findings):
-    """A javasolt zaj-regex ellenorzese. -> None (rendben) vagy az elutasitas oka.
+def check_noise_regex(rx, ref_templates, all_findings, must_keep=()):
+    """A javasolt zaj-regex ellenorzese. -> None (rendben) vagy az elutasitas oka. A must_keep a known-dokumentum cimkezett mintasorai
+    (SOHA nem nyelheto el), a beepitett _CANARIES mellett.
     Nem takarhat el hibajellegu mintat, nem lehet tul szeles, illeszkednie kell a hivatkozott sablonok legalabb egyikere."""
     if not isinstance(rx, str) or not MIN_NOISE_REGEX <= len(rx) <= 200:
         return f"regex length must be {MIN_NOISE_REGEX}..200 characters (a short phrase such as GET /health would silence other services too)"
@@ -436,6 +437,9 @@ def check_noise_regex(rx, ref_templates, all_findings):
     for can in _CANARIES:
         if c.search(can):
             return "matches generic error text (too broad)"
+    hit = aiops.must_keep_conflict(rx, must_keep)
+    if hit:
+        return f"matches a must_keep line (critical events are never suppressed): {hit[:80]}"
     hit = [t for t in ref_templates if c.search(t)]   # a sablon ALAKJARA kell illeszkedni (a szamok <N>): a novelty-leletet csak igy nyeli el a szabaly
     if not hit:
         return "does not match any referenced pattern as stored (numbers appear as <N>)"
@@ -554,7 +558,7 @@ def parse_report(content, task="overview", ctx=None):
             known = ctx.get("refs", {})
             f["regex"] = normalize_noise_regex(f["regex"])
             f["refs"] = [r for r in f["refs"] if r in known]
-            reason = "no valid pattern reference" if not f["refs"] else check_noise_regex(f["regex"], [known[r] for r in f["refs"]], ctx.get("all", []))
+            reason = "no valid pattern reference" if not f["refs"] else check_noise_regex(f["regex"], [known[r] for r in f["refs"]], ctx.get("all", []), ctx.get("must_keep", ()))
             scan = None
             if not reason and ctx.get("scan"):   # az elo naplo 7 napjan is: a hivatkozott forras mas soraira (pl. valodi interfesz) mit nyelne el
                 try:
@@ -786,7 +790,8 @@ def _run_task(name, store, snap, model, now):
         inp = dict(snap, task="overview")
     elif name == "noise":
         inp, refs, allf = noise_input(store)
-        ctx = {"refs": refs, "all": allf, "scan": noise_scan}
+        cur_known = (store.current("known") or {"content": {}})["content"] or {}
+        ctx = {"refs": refs, "all": allf, "scan": noise_scan, "must_keep": [x for x in cur_known.get("must_keep", []) if isinstance(x, str)]}
     elif name == "incident_review":
         try:
             inp, refs = incident_input(now, set(_load_seen(store)))

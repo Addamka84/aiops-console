@@ -28,6 +28,7 @@ import time
 import urllib.parse
 import urllib.request
 
+import ingest
 import regex_guard
 from redact import redact, redact_obj
 
@@ -106,7 +107,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.15"
+__version__ = "2.0.0-alpha.16"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -298,8 +299,13 @@ def validate_known(d):
         return ["the document must be a JSON object"]
     errs = []
     for k in d:
-        if k not in ("context", "noise", "known_issues", "snoozes") and not str(k).startswith("_"):
+        if k not in ("context", "noise", "known_issues", "snoozes", "must_keep") and not str(k).startswith("_"):
             errs.append(f"{k}: unknown top-level key")
+    mk = d.get("must_keep", [])
+    if not isinstance(mk, list) or not all(isinstance(x, str) and 0 < len(x.strip()) <= MUST_KEEP_MAX_LEN for x in mk):
+        errs.append(f"must_keep: must be a list of non-empty sample lines (max {MUST_KEEP_MAX_LEN} characters each)")
+    elif len(mk) > MUST_KEEP_MAX:
+        errs.append(f"must_keep: at most {MUST_KEEP_MAX} sample lines")
     ctx = d.get("context", [])
     if not isinstance(ctx, list) or not all(isinstance(x, str) for x in ctx):
         errs.append("context: must be a list of strings")
@@ -379,7 +385,28 @@ def validate_known(d):
         bad = regex_guard.check(rxs)
         if bad:
             errs.append(bad)
+        else:   # a regexek biztonsagosak: egyik se nyelje el a must_keep mintasorokat (a kapu masodik vedvonala: a kezi PUT-ra es a jovahagyasra is vonatkozik)
+            for label, rx in [(f"noise[{i}]", x) for i, x in enumerate(d.get("noise", []))] + [(f"snoozes[{i}]", s["regex"]) for i, s in enumerate(d.get("snoozes", []))]:
+                hit = must_keep_conflict(rx, d.get("must_keep", []))
+                if hit:
+                    errs.append(f"{label}: matches a must_keep line ({hit[:80]!r}); critical events must never be suppressed")
     return errs
+
+
+MUST_KEEP_MAX, MUST_KEEP_MAX_LEN = 200, 300
+
+
+def must_keep_conflict(rx, lines):
+    """Az elnyelo regex (zaj / snooze) illeszkedik-e a must_keep mintasorok valamelyikere? -> az elso illeszkedo sor vagy None.
+    A mintasorban a szamok <N> helyorzok is lehetnek (mint a novelty-sablonokban): ezt egy tobbjegyu szamra cserelve is probaljuk."""
+    try:
+        c = re.compile(rx)
+    except (re.error, TypeError):
+        return None
+    for line in lines:
+        if c.search(line) or c.search(line.replace("<N>", "123")):
+            return line
+    return None
 
 
 UNTIL_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -836,7 +863,7 @@ def flap_decision(firings, labels, since_last_incident_s):
     if not CFG["FLAP_COUNT"] or firings < CFG["FLAP_COUNT"]:
         return False, ""
     note = f" (flapping: this alert fired {firings} times in the last {CFG['FLAP_WINDOW_H']} h)"
-    critical = any(str(lab.get("severity", "")).lower() == "critical" for lab in labels)
+    critical = any(ingest.level_of(lab.get("monitor"), lab.get("severity")) == "critical" for lab in labels)
     if not critical and since_last_incident_s < CFG["FLAP_COOLDOWN_MIN"] * 60:
         return True, note
     return False, note
