@@ -91,7 +91,24 @@ tr.unused td { opacity: .6; }
   nav.side button { width: auto; flex: none; }
   nav.side button.on { box-shadow: inset 0 -3px 0 var(--accent); }
 }
-@media (max-width: 640px) { .bar { padding: 8px 12px; gap: 8px; } .ver { display: none; } main { padding: 12px; } }
+@media (max-width: 640px) {
+  .bar { padding: 8px 12px; gap: 8px; } .ver { display: none; } main { padding: 12px; }
+  .panel { padding: 12px; overflow-x: visible; }
+  button.btn, .btn, button.icon { min-height: 38px; }
+  /* tables with a header row -> one card per row, "label: value" lines */
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: auto; }
+  table.stack thead { display: none; }
+  table.stack tr { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; background: var(--bg); }
+  table.stack td { border: 0; padding: 3px 0; text-align: left; white-space: normal; word-break: break-word; }
+  table.stack td[data-l]::before { content: attr(data-l); display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  table.stack td.num { text-align: left; }
+  table.stack td.nowrap, table.stack td .nowrap { white-space: normal; }
+  table.stack td:empty { display: none; }
+  table.stack td:last-child:not([data-l]) { padding-top: 6px; }
+  table.stack td input, table.stack td select, table.stack td textarea { width: 100%; box-sizing: border-box; }
+  .kv { grid-template-columns: 1fr; gap: 0; } .kv dt { margin-top: 6px; font-size: 12px; }
+  #toast { left: 12px; right: 12px; } #toast div { max-width: none; }
+}
 
 /* statistics */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }

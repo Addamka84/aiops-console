@@ -106,6 +106,17 @@ function renderShell(content) {
       h('span', { class: 'badge ' + (isAdmin() ? 'b-up' : 'b-unknown'), title: S.actor }, S.role),
       h('button', { class: 'btn', onclick: signOut }, 'Sign out'))),
     h('div', { class: 'layout' }, h('nav', { class: 'side', 'aria-label': 'Sections' }, items), h('main', {}, content)));
+  stackTables(app);
+}
+// Phone layout: tables with a header row become cards (CSS under 640 px); each cell gets its column name as data-l.
+function stackTables(root) {
+  for (const t of root.querySelectorAll('table')) {
+    const hr = t.tHead && t.tHead.rows[0];
+    if (!hr || t.classList.contains('stack')) continue;
+    const labels = [...hr.cells].map((c) => c.textContent.trim());
+    for (const b of t.tBodies) for (const r of b.rows) [...r.cells].forEach((c, i) => { if (labels[i]) c.setAttribute('data-l', labels[i]); });
+    t.classList.add('stack');
+  }
 }
 function go(tab) {
   S.tab = tab; storage.set('tab', tab);

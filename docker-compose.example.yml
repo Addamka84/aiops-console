@@ -6,7 +6,7 @@
 
 services:
   aiops:
-    image: ghcr.io/OWNER/aiops-console:v2.0.0-alpha.17
+    image: ghcr.io/OWNER/aiops-console:v2.0.0-alpha.18
     container_name: aiops
     restart: unless-stopped
     environment:
