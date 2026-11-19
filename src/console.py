@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 import aiops
 import detectors
+import ingest
 import novelty
 import runtime
 import settings
@@ -59,6 +60,12 @@ class TestIn(BaseModel):
 class TopoTestIn(BaseModel):
     text: str = ""
     content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett topologia)
+
+
+class IngestTestIn(BaseModel):
+    source: str = Field("", max_length=60)
+    value: str = Field("", max_length=100)
+    content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett dokumentum)
 
 
 class DetectorTestIn(BaseModel):
@@ -235,6 +242,8 @@ def create_app(rt, tokens=None):
         out = cur or {"id": 0, "key": key, "content": {}}
         if key == "settings":
             out = dict(out, effective=settings.effective(out["content"]), spec=settings.describe())
+        if key == "ingest":
+            out = dict(out, effective=ingest.effective(out["content"]), levels=list(ingest.LEVELS))
         return out
 
     @app.put("/api/v1/config/{key}")
@@ -314,6 +323,17 @@ def create_app(rt, tokens=None):
         res["baseline"] = {"noise_patterns": base["noise_patterns"], "noise_lines": base["noise_lines"],
                            "known_patterns": base["known_patterns"], "kept_patterns": base["kept_patterns"]}
         return res
+
+    @app.post("/api/v1/test/ingest")
+    def test_ingest(body: IngestTestIn, _: Actor = Depends(read)):
+        """Egy nyers sulyossag-ertek normalizalasa a (meg nem mentett) leképezéssel: -> {level, mapped, default}."""
+        doc = body.content if body.content is not None else (store.current("ingest") or {"content": {}})["content"]
+        try:
+            runtime.validate_doc("ingest", doc)
+        except runtime.DocError as e:
+            fail(e)
+        level, mapped = ingest.Config(doc).level(body.source, body.value if body.value.strip() else None)
+        return {"level": level, "mapped": mapped}
 
     # ------------------------------------------------------------ topologia: proba es lefedettseg
     def topo_of(content):

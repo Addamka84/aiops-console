@@ -2,8 +2,8 @@
 #   docker compose up -d                       (VictoriaLogs + konzol + egyszeri betoltes: topologia, zajszabalyok, 3 nap mult)
 #   docker compose --profile live up -d        (+ folyamatos, elo esemenyfolyam)
 #   docker compose run --rm loader storm --root esx-02     (eseményvihar elo bemutatohoz)
-# UI: http://127.0.0.1:8095 (belepes: a CONSOLE_ADMIN_TOKEN). Az AI-triazs (incidens-osszefoglalo) modellt igenyel: OLLAMA_URLS.
-# A modell nelkul is mukodik: korrelacio, zajszuro, ujdonsag-figyeles, Supervisor (mock), javaslatok, naplo-grafikon.
+# UI: http://127.0.0.1:8095 (belepes: a CONSOLE_ADMIN_TOKEN). Az AI-triazs-szoveget alapbol a demo-modell (llm: al-modell, determinisztikus) adja;
+# valodi modellhez: OLLAMA_URLS=http://<ollama-host>:11434 (es MODEL).
 
 services:
   victorialogs:
@@ -16,11 +16,11 @@ services:
     restart: unless-stopped
 
   aiops:
-    image: ${AIOPS_IMAGE:-ghcr.io/addamka84/aiops-console:v2.0.0-alpha.16}
+    image: ${AIOPS_IMAGE:-ghcr.io/addamka84/aiops-console:v2.0.0-alpha.17}
     environment:
       TZ: UTC
       VL_URL: http://victorialogs:9428
-      OLLAMA_URLS: ${OLLAMA_URLS:-http://host.docker.internal:11434}
+      OLLAMA_URLS: ${OLLAMA_URLS:-http://llm:11434}
       MODEL: ${MODEL:-qwen3.5:9b}
       CONSOLE_ADMIN_TOKEN: ${CONSOLE_ADMIN_TOKEN:-demo-admin-token-0123456789-abcdefghij}
     extra_hosts:
@@ -37,6 +37,19 @@ services:
     mem_limit: 256m
     depends_on:
       - victorialogs
+      - llm
+    restart: unless-stopped
+
+  # demo-modell: Ollama-kompatibilis, determinisztikus al-vegpont (demo/mock_llm.py), nincs valodi modell
+  llm:
+    image: python:3.12-slim
+    working_dir: /app
+    environment:
+      MODEL: ${MODEL:-qwen3.5:9b}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ..:/app:ro
+    command: ["python", "demo/mock_llm.py"]
     restart: unless-stopped
 
   # egyszeri: konzol-beallitas + mult feltoltese (ujrafuttatasa duplikalja a multat: 'docker compose down -v' utan inditsd ujra)

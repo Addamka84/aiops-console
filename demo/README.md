@@ -29,11 +29,11 @@ docker compose run --rm loader novel                   # a few never-seen messag
 After about 90 seconds (the settle window) the storm becomes **one incident** with a root-cause hypothesis instead of a dozen separate alerts.
 Roots: `esx-01..08`, `sw-acc-01..04`, `sw-core-1`, `sw-core-2`.
 
-## What works without an LLM
+## The demo model
 
-Correlation (topology based, one incident per storm), noise rules, new-pattern and rate-spike detection, the log volume graphs, proposals,
-the Supervisor in `mock` mode (deterministic, no model) and the audit log. The AI triage text of an incident and the daily digest need a model:
-set `OLLAMA_URLS` (default `http://host.docker.internal:11434`, i.e. an Ollama on the host) and `MODEL`.
+No real language model is needed: the `llm` service (`demo/mock_llm.py`) is an Ollama-compatible, **deterministic stand-in**. For an incident it rewords the correlator's root-cause hypothesis
+(title, evidence, suggested action); every text says it is canned. It is not an inference, so the triage wording is the only thing it fakes: correlation, noise rules, new-pattern detection,
+proposals, the Supervisor (`mock` mode) and the audit log are the real code. For a real model set `OLLAMA_URLS=http://<ollama-host>:11434` and `MODEL` before `docker compose up -d`.
 
 ## Measurement report
 
@@ -42,6 +42,7 @@ see `evalkit/examples/sample-report.html`. Run it from `stacks/aiops-console`.
 
 ## Reset
 
+`docker compose up -d` again re-applies a changed compose file without re-running the loader only if you name the services (`docker compose up -d llm aiops`).
 `docker compose down -v` removes all data (re-running `demo-init` on existing data would duplicate the history).
 
 ## Limits

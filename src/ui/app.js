@@ -80,7 +80,7 @@ const isAdmin = () => S.role === 'admin';
 // ---------------------------------------------------------------- shell
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
 const TABS = [['status', 'Status', 'Monitor'], ['history', 'History', 'Monitor'],
-  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['settings', 'Settings', 'Configure'],
+  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['settings', 'Settings', 'Configure'],
   ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
@@ -125,7 +125,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -360,7 +360,7 @@ async function pageStatus() {
 }
 
 // ---------------------------------------------------------------- noise & known issues
-const norm = (d) => Object.assign({}, d, { context: d.context || [], noise: d.noise || [], known_issues: d.known_issues || [] });
+const norm = (d) => Object.assign({}, d, { context: d.context || [], noise: d.noise || [], known_issues: d.known_issues || [], must_keep: d.must_keep || [] });
 const TS_PREFIX = /^(?:\[?<N>-<N>-<N>[ T]<N>:<N>:<N>(?:[.,]<N>)?(?:\+<N>:<N>|Z)?\]?\s*)+/;
 
 function ruleFromLine(text) {
@@ -404,14 +404,29 @@ async function dropSnooze(id) {
   try { await api('DELETE', '/api/v1/snoozes/' + encodeURIComponent(id)); await refreshSnoozes(); } catch (e) { toast(e.message, true); }
   draw();
 }
+// The document sent to the server: an empty must_keep list is left out (the key is optional).
+function draftOut() {
+  const c = clone(S.draft);
+  c.must_keep = (c.must_keep || []).map((x) => x.trim()).filter(Boolean);
+  if (!c.must_keep.length) delete c.must_keep;
+  return c;
+}
+// Index of the first noise rule that matches a must_keep sample line (client-side hint only; the server decides on save).
+function mkConflict(line) {
+  const variants = [line, line.replace(/<N>/g, '123')];
+  for (let i = 0; i < S.draft.noise.length; i++) {
+    try { const rx = new RegExp(S.draft.noise[i]); if (variants.some((v) => rx.test(v))) return i; } catch (e) { /* inline flags etc.: left to the server */ }
+  }
+  return null;
+}
 async function runTest() {
   S.testError = '';
-  try { S.test = await api('POST', '/api/v1/test/known', { hours: S.testHours, content: S.draft }); } catch (e) { S.test = null; S.testError = e.message; }
+  try { S.test = await api('POST', '/api/v1/test/known', { hours: S.testHours, content: draftOut() }); } catch (e) { S.test = null; S.testError = e.message; }
   S.diff = null;
   draw();
 }
 async function showDiff() {
-  try { S.diff = (await api('POST', '/api/v1/config/known/diff', { content: S.draft })).diff; } catch (e) { toast(e.message, true); }
+  try { S.diff = (await api('POST', '/api/v1/config/known/diff', { content: draftOut() })).diff; } catch (e) { toast(e.message, true); }
   draw();
 }
 async function submit(kind) {
@@ -419,11 +434,11 @@ async function submit(kind) {
   if (!comment) { toast('Add a short comment (what and why).', true); return; }
   try {
     if (kind === 'save') {
-      const r = await api('PUT', '/api/v1/config/known', { content: S.draft, comment });
+      const r = await api('PUT', '/api/v1/config/known', { content: draftOut(), comment });
       toast(r.changed ? 'Saved as revision ' + r.rev + '; active now.' : 'No changes.');
       await loadKnown();
     } else {
-      const r = await api('POST', '/api/v1/proposals', { key: 'known', content: S.draft, comment });
+      const r = await api('POST', '/api/v1/proposals', { key: 'known', content: draftOut(), comment });
       toast('Proposal #' + r.id + ' created.');
       S.comment = '';
       refreshPendingCount();
@@ -469,6 +484,21 @@ function draw() {
       f('match_output', 'Output regex (optional): drops model issues whose title/evidence matches; defaults to the input regex', true));
   });
 
+  const mkRows = d.must_keep.map((m, i) => {
+    const hint = h('span', { class: 'err small' });
+    const upd = () => {   // updated in place (no redraw: a redraw on blur would swallow the click on Save)
+      const hit = mkConflict(d.must_keep[i]);
+      hint.textContent = hit !== null ? 'noise rule #' + (hit + 1) + ' matches this line: it would be rejected' : '';
+      hint.title = hit !== null ? d.noise[hit] : '';
+      hint.style.display = hit !== null ? '' : 'none';
+    };
+    upd();
+    return h('div', { style: 'margin-bottom:6px' },
+      h('div', { class: 'row top' },
+        h('input', { class: 'grow mono', value: m, oninput: (e) => { d.must_keep[i] = e.target.value; touched(); upd(); } }),
+        h('button', { class: 'icon', title: 'Remove', onclick: () => { d.must_keep.splice(i, 1); touched(); draw(); } }, '×')),
+      hint);
+  });
   const keptRows = t ? t.kept_top.map((k) => h('tr', {}, h('td', { class: 'num' }, k.hits + '×'), h('td', { class: 'mono small' }, k.text),
     h('td', { class: 'nowrap' },
       h('button', { class: 'btn small', title: 'Add a permanent noise rule from this line', onclick: () => addNoise(ruleFromLine(k.text)) }, '+ noise'), ' ',
@@ -522,6 +552,9 @@ function draw() {
       h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn', onclick: () => addNoise('') }, '+ Add noise rule'))),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Known issues (' + d.known_issues.length + ')'), issueCards,
       h('button', { class: 'btn', onclick: () => { d.known_issues.push({ id: '', note: '', match: '' }); touched(); draw(); } }, '+ Add known issue')),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Never suppress (' + d.must_keep.length + ')'),
+      h('p', { class: 'muted small' }, 'Sample lines of events that must never be muted, as "host | ident | message" with numbers as <N>. A noise rule or snooze that matches one of them is rejected, whether it is typed here, proposed by the Supervisor or approved later.'),
+      mkRows, h('button', { class: 'btn', onclick: () => { d.must_keep.push(''); touched(); draw(); } }, '+ Add sample line')),
     snoozePanel, testPanel, bar,
   ]);
 }
@@ -1000,11 +1033,91 @@ async function pageHistory() {
   renderShell([
     h('h2', {}, 'History'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
-      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'ingest', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
     h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
     audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
       h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),
         h('tbody', {}, audit.map((a) => h('tr', {}, h('td', { class: 'small' }, fmtTime(a.ts)), h('td', { class: 'small' }, a.actor), h('td', { class: 'mono small' }, a.action), h('td', { class: 'small' }, a.detail)))))) : null,
+  ]);
+}
+
+// ---------------------------------------------------------------- severity mapping & ingest
+S.ing = null;
+async function loadIng() {
+  const r = await api('GET', '/api/v1/config/ingest');
+  const keep = S.ing || {};
+  S.ing = { rev: r.id, base: r.content, eff: r.effective, text: JSON.stringify(r.content, null, 2), comment: '', error: '', diff: null,
+    src: keep.src || 'dynatrace', val: keep.val || '', res: null };
+}
+function ingDraft() {
+  try {
+    const d = JSON.parse(S.ing.text || '{}');
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('the document must be a JSON object');
+    S.ing.error = ''; return d;
+  } catch (e) { S.ing.error = 'Not valid JSON: ' + e.message; drawIng(); return null; }
+}
+async function ingTry() {
+  const d = ingDraft(); if (!d) return;
+  try { S.ing.res = await api('POST', '/api/v1/test/ingest', { source: S.ing.src, value: S.ing.val, content: d }); } catch (e) { S.ing.res = null; S.ing.error = e.message; }
+  drawIng();
+}
+async function ingDiff() {
+  const d = ingDraft(); if (!d) return;
+  try { S.ing.diff = (await api('POST', '/api/v1/config/ingest/diff', { content: d })).diff; S.ing.error = ''; } catch (e) { S.ing.error = e.message; }
+  drawIng();
+}
+async function ingSubmit(kind) {
+  const d = ingDraft(); if (!d) return;
+  const comment = S.ing.comment.trim();
+  if (!comment) { toast('Add a short comment (what and why).', true); return; }
+  try {
+    if (kind === 'save') {
+      const r = await api('PUT', '/api/v1/config/ingest', { content: d, comment });
+      toast(r.changed ? 'Saved as revision ' + r.rev + '; active now.' : 'No changes.');
+      S.ing = null; await loadIng();
+    } else {
+      const r = await api('POST', '/api/v1/proposals', { key: 'ingest', content: d, comment });
+      toast('Proposal #' + r.id + ' created.'); S.ing.comment = ''; refreshPendingCount();
+    }
+  } catch (e) { S.ing.error = e.message; toast('Rejected: see the message above', true); }
+  drawIng();
+}
+const pageIngest = async () => { if (!S.ing) await loadIng(); drawIng(); };
+const ingSev = (l) => (l === 'critical' ? 'critical' : l === 'error' ? 'high' : l === 'warning' ? 'medium' : 'info');
+function drawIng() {
+  const g = S.ing;
+  const dirty = (() => { try { return JSON.stringify(JSON.parse(g.text || '{}')) !== JSON.stringify(g.base); } catch (e) { return true; } })();
+  const effRows = Object.entries(g.eff || {}).map(([name, s]) => h('tr', {},
+    h('td', { class: 'mono small nowrap' }, name, h('div', { class: 'muted' }, s.builtin ? 'built-in + overrides' : 'custom')),
+    h('td', {}, Object.entries(s.severity).map(([raw, lvl]) => h('span', { style: 'margin-right:10px;white-space:nowrap' },
+      h('span', { class: 'mono small' }, raw + ' → '), sevBadge(ingSev(lvl)), ' ', h('span', { class: 'small muted' }, lvl)))),
+    h('td', { class: 'small nowrap' }, 'unmapped → ', h('strong', {}, s.default)),
+    h('td', { class: 'mono small muted' }, Object.entries(s.fields).map(([k, v]) => k + '=' + v).join(', ') || 'default field names')));
+  const res = g.res ? h('span', {}, ' → ', sevBadge(ingSev(g.res.level)), ' ', h('strong', {}, g.res.level),
+    g.res.mapped ? null : h('span', { class: 'err small' }, ' (not mapped: the default applies)')) : null;
+  renderShell([
+    h('h2', {}, 'Severity & ingest'),
+    h('p', { class: 'muted' }, 'Every tool has its own severity scale. The console works on one: debug, info, warning, error, critical. The mapping turns a raw value into that scale. An unmapped value counts as the source default (error unless set), never silently as info.'),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Overrides (JSON document)'),
+      h('p', { class: 'muted small' }, 'The built-in defaults for four common tools are typical scales, not vendor specifications: check them against your real values. Shape: sources.<tool>.severity {raw: level}, .default, .fields {host, msg, ts, level, ident: dotted paths}.'),
+      h('textarea', { class: 'mono', rows: 12, style: 'width:100%', value: g.text, spellcheck: false, oninput: (e) => { g.text = e.target.value; g.diff = null; } }),
+      g.error ? h('div', { class: 'err' }, g.error) : null,
+      g.diff !== null ? diffEl(g.diff) : null,
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('input', { class: 'grow', placeholder: 'Comment: what and why', value: g.comment, oninput: (e) => { g.comment = e.target.value; } }),
+        h('button', { class: 'btn', onclick: ingDiff }, 'Preview diff'),
+        h('button', { class: 'btn', onclick: () => ingSubmit('propose') }, 'Propose'),
+        isAdmin() ? h('button', { class: 'btn primary', onclick: () => ingSubmit('save') }, 'Save') : null),
+      h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Revision #' + g.rev + (dirty ? ' · unsaved changes' : '') + (isAdmin() ? '' : ' · read-only token: use Propose, an admin approves.'))),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Try a value'),
+      h('div', { class: 'row' },
+        h('input', { list: 'ing-src', value: g.src, placeholder: 'tool, e.g. dynatrace', oninput: (e) => { g.src = e.target.value; } }),
+        h('datalist', { id: 'ing-src' }, Object.keys(g.eff || {}).map((n) => h('option', { value: n }))),
+        h('input', { value: g.val, placeholder: 'raw severity, e.g. AVAILABILITY', oninput: (e) => { g.val = e.target.value; }, onkeydown: (e) => { if (e.key === 'Enter') ingTry(); } }),
+        h('button', { class: 'btn primary', onclick: ingTry }, 'Normalise'), res),
+      h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Uses the document above (unsaved edits included); nothing is changed.')),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Effective mapping (saved configuration)'),
+      h('table', {}, h('thead', {}, h('tr', {}, ['Tool', 'Raw value → level', 'Fallback', 'Field paths'].map((x) => h('th', {}, x)))), h('tbody', {}, effRows))),
   ]);
 }
 

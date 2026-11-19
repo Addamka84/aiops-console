@@ -107,6 +107,12 @@ class Config:
         return (s["default"] if s else FALLBACK_LEVEL), False
 
 
+def effective(doc=None):
+    """A hatályos leképezés (beépített alap + konfig) a kezelőfelületnek: {forrás: {severity, default, fields, builtin}}."""
+    return {n: {"severity": dict(s["severity"]), "default": s["default"], "fields": dict(s["fields"]), "builtin": n in DEFAULT_SOURCES}
+            for n, s in sorted(Config(doc).sources.items())}
+
+
 ACTIVE = Config()   # a konzol runtime-ja cseréli a konfig változásakor (mint az aiops.TOPOLOGY)
 
 

@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 
+from fastapi.testclient import TestClient
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -12,7 +14,9 @@ os.environ["KNOWN_FILE"] = os.path.join(HERE, "fixtures", "known.json")
 
 import aiops  # noqa: E402
 import ingest  # noqa: E402
+import console  # noqa: E402
 import runtime  # noqa: E402
+from store import Store  # noqa: E402
 from evalkit import run, schema  # noqa: E402
 
 
@@ -101,6 +105,51 @@ class IngestTests(unittest.TestCase):
             self.assertEqual([e["level"] for e in schema.load(out)], ["warning", "critical"])
             json.dump({"sources": {"x y": {}}}, open(ad, "w"))
             self.assertEqual(run.main(["import", "--source", "dynatrace", "--input", src, "--out", out, "--adapter", ad]), 1)
+
+
+class IngestApiTests(unittest.TestCase):
+    """A REST API: hatályos leképezés, próba (mentés nélkül), mentés + hot reload, és a must_keep elutasítás üzenete."""
+    R = {"Authorization": "Bearer r-token"}
+    A = {"Authorization": "Bearer a-token"}
+
+    def setUp(self):
+        self.rt = runtime.Runtime(Store())
+        self.rt.bootstrap()
+        self.c = TestClient(console.create_app(self.rt, tokens={"read": "r-token", "admin": "a-token"}))
+
+    def tearDown(self):
+        ingest.set_active({})
+
+    def test_get_has_effective_mapping(self):
+        r = self.c.get("/api/v1/config/ingest", headers=self.R).json()
+        self.assertEqual(r["levels"], list(ingest.LEVELS))
+        self.assertEqual(r["effective"]["dynatrace"]["severity"]["availability"], "critical")
+        self.assertTrue(r["effective"]["dynatrace"]["builtin"])
+
+    def test_try_value_uses_unsaved_document(self):
+        def t(**kw):
+            return self.c.post("/api/v1/test/ingest", json=kw, headers=self.R)
+        self.assertEqual(t(source="dynatrace", value="AVAILABILITY").json(), {"level": "critical", "mapped": True})
+        self.assertEqual(t(source="dynatrace", value="WEIRD").json(), {"level": "error", "mapped": False})
+        doc = {"sources": {"dynatrace": {"severity": {"WEIRD": "info"}}}}
+        self.assertEqual(t(source="dynatrace", value="WEIRD", content=doc).json(), {"level": "info", "mapped": True})
+        self.assertEqual(t(source="dynatrace", value="", content=doc).json()["mapped"], False)
+        self.assertEqual(t(source="x", value="y", content={"sources": {"A B": {}}}).status_code, 422)
+
+    def test_save_applies_immediately_and_read_token_cannot(self):
+        doc = {"sources": {"solarwinds": {"severity": {"Serious": "critical"}}}}
+        self.assertEqual(self.c.put("/api/v1/config/ingest", json={"content": doc}, headers=self.R).status_code, 403)
+        self.assertEqual(self.c.put("/api/v1/config/ingest", json={"content": {"sources": {"a": {"default": "x"}}}}, headers=self.A).status_code, 422)
+        self.assertTrue(self.c.put("/api/v1/config/ingest", json={"content": doc, "comment": "t"}, headers=self.A).json()["changed"])
+        self.assertEqual(ingest.level_of("solarwinds", "Serious"), "critical")      # hot reload
+        p = self.c.post("/api/v1/proposals", json={"key": "ingest", "content": {"sources": {}}, "comment": "x"}, headers=self.R)
+        self.assertEqual(p.status_code, 200)
+
+    def test_known_put_rejects_noise_matching_must_keep_with_message(self):
+        doc = {"must_keep": ["h | dynatrace | Problem P-<N>: down"], "noise": [r"\| dynatrace \| Problem P-"]}
+        r = self.c.put("/api/v1/config/known", json={"content": doc, "comment": "t"}, headers=self.A)
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("must_keep", json.dumps(r.json()))
 
 
 if __name__ == "__main__":
