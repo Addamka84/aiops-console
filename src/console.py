@@ -405,6 +405,46 @@ def create_app(rt, tokens=None):
             out["recent_error"] = "VictoriaLogs unavailable"
         return out
 
+    @app.get("/api/v1/detectors/health")
+    def detectors_health(_: Actor = Depends(read)):
+        """Detektor-attekintes: tuzeles 30 napban, utolso tuzeles, zaszlok (letiltott vazlat, tul zajos, csendes, hibas)."""
+        dets = ((store.current("detectors") or {"content": {}})["content"] or {}).get("detectors", [])
+        out = {"noisy_30d": detectors.NOISY_30D}
+        try:
+            fired = detectors.fired_30d()
+        except Exception:  # noqa: BLE001 - a tar elerhetetlensege nem akadalyozhatja az attekintest
+            fired, out["fired_error"] = {}, "VictoriaLogs unavailable"
+        out["detectors"] = detectors.health(dets, fired, aiops.DETECTOR_STATUS)
+        out["counts"] = {f: sum(1 for h in out["detectors"] if f in h["flags"]) for f in ("draft-disabled", "disabled", "noisy", "quiet", "error")}
+        return out
+
+    @app.post("/api/v1/novelty/{fid}/detector-draft")
+    def novelty_detector_draft(fid: int, who: Actor = Depends(read)):
+        """'+ detector': determinisztikus detektor-vazlat a leletbol (host + azonosito + a sablon allando szovege), 7 napos visszateszttel;
+        javaslatkent kerul be (letiltott detektor), a jovahagyas es a bekapcsolas az admin dolga."""
+        f = store.nov_finding(fid)
+        if not f:
+            raise HTTPException(404, f"no finding {fid}")
+        cur = (store.current("detectors") or {"content": {}})["content"] or {}
+        dets = list(cur.get("detectors", []))
+        try:
+            d, query = supervisor.finding_detector_draft(f, dets)
+        except ValueError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        err, bt = supervisor.check_coverage_query(query)
+        if err:
+            raise HTTPException(422, {"errors": [err]})
+        try:
+            doc = runtime.validate_doc("detectors", dict(cur, detectors=dets + [d]))
+        except runtime.DocError as e:
+            fail(e)
+        if sum(1 for p in store.proposals("pending", 1000) if p["author"] == who.name) >= MAX_PENDING_PER_ACTOR:
+            raise HTTPException(429, f"too many pending proposals from {who.name} (limit {MAX_PENDING_PER_ACTOR})")
+        comment = (f"+ detector from finding #{fid} ({f['host']} / {f['ident']}). Filter: {query}. "
+                   f"{bt['hours'] // 24}-day backtest: {bt['firings']} firing(s), {bt['total']} matching line(s).")
+        pid = store.add_proposal("detectors", doc, who.name, comment, store.revision_id("detectors"))
+        return {"id": pid, "query": query, "backtest": bt, "detector": d["id"]}
+
     # ------------------------------------------------------------ Auto AI Supervisor (csak olvaso attekintes, jelentes)
     @app.get("/api/v1/supervisor")
     def supervisor_status(_: Actor = Depends(read)):
@@ -487,13 +527,35 @@ def create_app(rt, tokens=None):
             fail(e)
 
     @app.post("/api/v1/proposals/{pid}/approve")
-    def approve(pid: int, force: bool = False, who: Actor = Depends(admin)):
+    def approve(pid: int, force: bool = False, enable: bool = False, who: Actor = Depends(admin)):
+        """enable=true detektor-javaslatnal: a jovahagyas altal UJONNAN felvett, letiltott detektorokat egy kovetkezo revizioban be is kapcsolja
+        (a vazlatok letiltva erkeznek; bekapcsolas nelkul zsakutca). Mas kulcsnal nincs hatasa."""
+        before = None
         try:
+            prop = store.proposal(pid)
+            if enable and prop["key"] == "detectors":
+                before = {d.get("id") for d in ((store.current("detectors") or {"content": {}})["content"] or {}).get("detectors", [])}
             rid = store.decide(pid, True, who.name, force=force, validate=runtime.validate_doc)
         except (StoreError, runtime.DocError) as e:
             fail(e)
+        out = {"status": "approved", "rev": rid}
+        if before is not None:
+            cur = store.current("detectors")
+            doc = json.loads(json.dumps(cur["content"]))
+            ids = []
+            for d in doc.get("detectors", []):
+                if d.get("id") not in before and d.get("enabled") is False:
+                    d["enabled"] = True
+                    ids.append(d["id"])
+            if ids:
+                try:
+                    doc = runtime.validate_doc("detectors", doc)
+                    out["enable_rev"] = store.put("detectors", doc, who.name, f"enabled with the approval of proposal #{pid}: {', '.join(ids)}")
+                    out["enabled"] = ids
+                except runtime.DocError as e:
+                    out["enable_error"] = str(e)[:200]
         rt.changed()
-        return {"status": "approved", "rev": rid}
+        return out
 
     @app.post("/api/v1/proposals/{pid}/reject")
     def reject(pid: int, who: Actor = Depends(admin)):

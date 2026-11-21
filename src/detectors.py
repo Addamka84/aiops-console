@@ -272,3 +272,45 @@ def backtest(d, hours, now=None):
     return {"hours": hours, "window_min": d["window_min"], "mode": d["mode"], "buckets": len(all_buckets), "total": total,
             "firings": sum(1 for e in events if e["fires"]), "events": events[-60:], "events_total": len(events), "samples": samples,
             "no_match": (d["mode"] == "count" and total == 0) or (d["mode"] == "absent" and not any(series.values()))}
+
+
+# ---------------------------------------------------------------- allapot-attekintes (ki tuzelt, melyik vazlat var bekapcsolasra)
+NOISY_30D = 20                                            # ennyi tuzeles 30 napon belul: tul zajos (napi cooldown mellett is)
+DRAFT_NOTES = ("supervisor draft", "from a new-pattern")  # a vazlatok megjegyzesenek eleje
+
+
+def health(dets, fired=None, status=None):
+    """dets: a konfiguralt detektorok; fired: {id: {"n": tuzeles 30 nap, "last": ido}}; status: aiops.DETECTOR_STATUS.
+    -> [{id, name, enabled, fired_30d, last_fired, flags}]. Zászlók: draft-disabled (jovahagyott, de letiltott vazlat), disabled, noisy,
+    quiet (engedelyezett, 30 napja nem tuzelt: nem hiba, csak tajekoztato), error (a kiertekeles hibaja)."""
+    fired, status = fired or {}, status or {}
+    out = []
+    for d in dets:
+        d = full(d)
+        f = fired.get(d["id"], {})
+        n = int(f.get("n", 0) or 0)
+        flags = []
+        if not d["enabled"]:
+            flags.append("draft-disabled" if str(d.get("note", "")).startswith(DRAFT_NOTES) else "disabled")
+        else:
+            if n == 0:
+                flags.append("quiet")
+            if n >= NOISY_30D:
+                flags.append("noisy")
+        if (status.get(d["id"]) or {}).get("error"):
+            flags.append("error")
+        out.append({"id": d["id"], "name": d["name"], "enabled": d["enabled"], "mode": d["mode"], "severity": d["severity"], "action": d["action"],
+                    "fired_30d": n, "last_fired": str(f.get("last", ""))[:19], "flags": flags})
+    return out
+
+
+def fired_30d():
+    """{detector-id: {"n": tuzeles, "last": utolso}} a VictoriaLogs-bol (az aiops saját pipeline:ai kind:detector eseményei). OSError/ValueError a hívóra marad."""
+    rows = aiops.vl_query("_time:30d pipeline:ai kind:detector | stats by (detector) count() as n, max(_time) as last", timeout=20)
+    out = {}
+    for r in rows:
+        try:
+            out[str(r.get("detector", ""))] = {"n": int(r.get("n", 0) or 0), "last": str(r.get("last", ""))}
+        except ValueError:
+            continue
+    return out

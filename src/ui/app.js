@@ -323,6 +323,10 @@ function noveltyPanel() {
         const r = await api('POST', '/api/v1/proposals', { key: 'known', comment: 'noise from the novelty detector: ' + x.ident, patch: { add_noise: [ruleFromLine(text(x))] } });
         toast('Proposal #' + r.id + ' created.'); refreshPendingCount();
       }) }, '+ noise'), ' ',
+      h('button', { class: 'btn', title: 'Draft a detector for this pattern (alert when it appears): files a proposal with a 7-day backtest; the detector stays disabled until you approve and enable it', onclick: () => noveltyDo(async () => {
+        const r = await api('POST', '/api/v1/novelty/' + x.id + '/detector-draft');
+        toast('Detector proposal #' + r.id + ' created (' + r.backtest.firings + ' firing(s) in ' + (r.backtest.hours / 24) + ' days).'); refreshPendingCount();
+      }) }, '+ detector'), ' ',
       isAdmin() ? h('button', { class: 'btn', title: 'Mark as reviewed (hides it from this list and the digest)', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/' + x.id + '/dismiss')) }, 'Dismiss') : null));
   const ui = S.novUi;
   const redraw = () => pageStatus().catch(() => {});
@@ -793,14 +797,30 @@ S.det = null;
 const detNorm = (d) => ({ detectors: (d && d.detectors) || [] });
 const detFull = (d) => Object.assign({}, DET_DEFAULTS, d);
 async function loadDet() {
-  const [r, st] = await Promise.all([api('GET', '/api/v1/config/detectors'), api('GET', '/api/v1/detectors/status').catch(() => null)]);
+  const [r, st, hl] = await Promise.all([api('GET', '/api/v1/config/detectors'), api('GET', '/api/v1/detectors/status').catch(() => null), api('GET', '/api/v1/detectors/health').catch(() => null)]);
   const keep = S.det || {};
-  S.det = { rev: r.id, base: detNorm(r.content), draft: clone(detNorm(r.content)), edit: null, status: st, bt: null, btError: '', btHours: keep.btHours || 168, diff: null, comment: '', error: '' };
+  S.det = { rev: r.id, base: detNorm(r.content), draft: clone(detNorm(r.content)), edit: null, status: st, health: hl, bt: null, btError: '', btHours: keep.btHours || 168, diff: null, comment: '', error: '' };
 }
 function detSummary(d) {
   const f = detFull(d);
   return f.mode === 'absent' ? 'no matching line for ' + f.window_min + ' min'
     : '≥ ' + f.threshold + ' in ' + f.window_min + ' min' + ((f.group_by || []).length ? ' per ' + f.group_by.join(', ') : '');
+}
+// Detector health: which detectors fired in 30 days, which approved drafts were never switched on, which are too noisy or failing.
+const DET_FLAG = { 'draft-disabled': ['b-stale', 'approved draft, still disabled', 'Approved but never switched on: tick On in the table below and save, or remove it.'],
+  disabled: ['b-unknown', 'disabled', 'Switched off.'], noisy: ['sev-medium', 'noisy', 'Fired very often: the filter may be too broad or the cooldown too short.'],
+  error: ['sev-high', 'error', 'The last evaluation failed.'], quiet: ['b-unknown', 'quiet 30 d', 'Enabled but did not fire in 30 days. Normal for a rare condition.'] };
+function detHealthPanel(hl) {
+  if (!hl || !hl.detectors) return null;
+  const c = hl.counts || {};
+  const flagged = hl.detectors.filter((x) => x.flags.some((f) => f !== 'quiet'));
+  return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Detector health (last 30 days)'),
+    h('p', { class: 'muted small' }, (c['draft-disabled'] || 0) + ' approved draft(s) still disabled · ' + (c.noisy || 0) + ' noisy (≥ ' + hl.noisy_30d + ' firings) · ' + (c.error || 0) + ' failing · '
+      + (c.quiet || 0) + ' quiet for 30 days (not a problem by itself)' + (hl.fired_error ? ' · firing counts unavailable (' + hl.fired_error + ')' : '')),
+    flagged.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Detector', 'Fired (30 d)', 'Last fired', 'Flags'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, flagged.map((x) => h('tr', {}, h('td', {}, h('strong', {}, x.name), h('div', { class: 'mono small muted' }, x.id)), h('td', { class: 'num' }, String(x.fired_30d)),
+        h('td', { class: 'small nowrap' }, x.last_fired ? fmtTime(x.last_fired) : '-'),
+        h('td', {}, x.flags.filter((f) => f !== 'quiet').map((f) => [h('span', { class: 'badge ' + DET_FLAG[f][0], title: DET_FLAG[f][2] }, DET_FLAG[f][1]), ' '])))))) : h('p', { class: 'muted' }, 'Nothing needs attention.'));
 }
 function detEditStart(d, isNew) { S.det.edit = { isNew, orig: d.id, d: clone(detFull(d)) }; S.det.bt = null; S.det.btError = ''; drawDet(); }
 function detEditApply() {
@@ -838,7 +858,7 @@ async function detSubmit(kind) {
   } catch (e) { S.det.error = e.message; toast('Rejected: see the message above', true); }
   drawDet();
 }
-const pageDetectors = async () => { if (!S.det) await loadDet(); else { try { S.det.status = await api('GET', '/api/v1/detectors/status'); } catch (e) { /* keep the old one */ } } drawDet(); };
+const pageDetectors = async () => { if (!S.det) await loadDet(); else { try { S.det.status = await api('GET', '/api/v1/detectors/status'); } catch (e) { /* keep the old one */ } try { S.det.health = await api('GET', '/api/v1/detectors/health'); } catch (e) { /* keep the old one */ } } drawDet(); };
 
 function detEditor() {
   const e = S.det.edit, d = e.d, t = S.det;
@@ -925,6 +945,7 @@ function drawDet() {
     h('p', { class: 'muted' }, 'Rules over the logs that the service evaluates itself, every ' + ((t.status && t.status.interval_s) || 60) + ' s' + (t.status && t.status.mode === 'off' ? ' (currently OFF: setting DETECTOR_MODE)' : '') +
       '. A firing becomes a model-triaged incident (noise rules, snoozes and the topology apply), a direct notification, or just a record. Always run the backtest before saving: it shows how often the rule would have fired.'),
     t.edit ? detEditor() : null,
+    detHealthPanel(t.health),
     h('div', { class: 'panel' }, h('div', { class: 'row' }, h('h3', { class: 'grow', style: 'margin:0' }, 'Detectors (' + d.detectors.length + ')'), tplSel),
       d.detectors.length ? h('table', {}, h('thead', {}, h('tr', {}, ['On', 'Detector', 'Condition', 'Action', 'State', ''].map((x) => h('th', {}, x)))), h('tbody', {}, rows))
         : h('p', { class: 'muted' }, 'No detectors yet. Start from a template: error burst in a container, a source going silent, or a specific message.')),
@@ -1012,9 +1033,13 @@ async function pageProposals() {
   const all = await api('GET', url());
   let more = all.length === PAGE;
   S.proposalsPending = (await api('GET', '/api/v1/proposals?status=pending&limit=200')).length;
-  const decide = async (id, what, force) => {
-    try { await api('POST', '/api/v1/proposals/' + id + '/' + what + (force ? '?force=true' : '')); toast('Proposal #' + id + ' ' + what + 'd.'); S.draft = null; render(); }
-    catch (e) { toast(e.message, true); }
+  const decide = async (id, what, force, enable) => {
+    const q = [force ? 'force=true' : '', enable ? 'enable=true' : ''].filter(Boolean).join('&');
+    try {
+      const r = await api('POST', '/api/v1/proposals/' + id + '/' + what + (q ? '?' + q : ''));
+      toast('Proposal #' + id + ' ' + what + 'd.' + (r && r.enabled && r.enabled.length ? ' Enabled: ' + r.enabled.join(', ') + '.' : '') + (r && r.enable_error ? ' Could not enable: ' + r.enable_error : ''), !!(r && r.enable_error));
+      S.draft = null; S.det = null; render();
+    } catch (e) { toast(e.message, true); }
   };
   const card = (p) => {
     const body = h('div', { class: 'muted small' }, 'Loading diff...');
@@ -1022,6 +1047,7 @@ async function pageProposals() {
       if (!det.open || det.dataset.loaded) return; det.dataset.loaded = '1';
       try { const x = await api('GET', '/api/v1/proposals/' + p.id); body.replaceChildren(...[evidenceEl(x.evidence), diffEl(x.diff)].filter(Boolean)); } catch (e) { body.textContent = e.message; }
     } }, h('summary', {}, 'Show impact and changes'), body);
+    const enBox = p.key === 'detectors' && p.status === 'pending' && isAdmin() ? h('input', { type: 'checkbox', checked: true }) : null;
     return h('div', { class: 'panel' },
       h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status),
         p.attention && p.attention.length ? h('span', { class: 'badge b-stale', title: 'The rule text touches security or availability keywords. Open the impact view and read the covered lines before approving. This is a flag, not a verdict.' }, 'check carefully: ' + p.attention.join(', ')) : null,
@@ -1029,7 +1055,8 @@ async function pageProposals() {
         h('span', { class: 'muted small' }, p.author + ' · ' + fmtTime(p.ts) + (p.decided_by ? ' · ' + p.status + ' by ' + p.decided_by : ''))),
       h('p', {}, p.comment), det,
       p.status === 'pending' && isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
-        h('button', { class: 'btn primary', disabled: p.stale && p.merge !== 'clean', onclick: () => decide(p.id, 'approve') }, p.stale && p.merge === 'clean' ? 'Approve (merge)' : 'Approve'),
+        h('button', { class: 'btn primary', disabled: p.stale && p.merge !== 'clean', onclick: () => decide(p.id, 'approve', false, enBox && enBox.checked) }, p.stale && p.merge === 'clean' ? 'Approve (merge)' : 'Approve'),
+        enBox ? h('label', { class: 'small', title: 'Detector drafts arrive disabled. Tick to switch the new detector(s) on in the same step (a second revision, easy to roll back).' }, enBox, ' enable the new detector') : null,
         p.stale && p.merge !== 'clean' ? h('button', { class: 'btn', onclick: () => confirm('Conflicting changes in ' + (p.conflicts || []).join(', ') + '. Apply the proposal as written? This overwrites the newer changes there.') && decide(p.id, 'approve', true) }, 'Approve anyway (overwrite)') : null,
         h('button', { class: 'btn danger', onclick: () => decide(p.id, 'reject') }, 'Reject')) : null);
   };

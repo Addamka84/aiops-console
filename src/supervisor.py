@@ -126,6 +126,16 @@ def snapshot(store, now=None):
     except (OSError, ValueError, http.client.HTTPException) as e:
         snap["alerts_error"] = type(e).__name__
     snap["detectors"] = [{"id": k, "last_hits": v.get("last_hits"), "error": v.get("error", "")} for k, v in sorted(aiops.DETECTOR_STATUS.items())]
+    try:   # a figyelmet igenylo detektorok (letiltott vazlat, tul zajos, hibas): determinisztikus, a 'quiet' csak tajekoztato, ezert kimarad
+        dets_cfg = ((store.current("detectors") or {"content": {}})["content"] or {}).get("detectors", [])
+        try:
+            fired = detectors.fired_30d()
+        except (OSError, ValueError, http.client.HTTPException):
+            fired = {}
+            snap["detector_health_note"] = "firing counts unavailable (log store not reachable)"
+        snap["detector_health"] = [h for h in detectors.health(dets_cfg, fired, aiops.DETECTOR_STATUS) if set(h["flags"]) - {"quiet"}]
+    except Exception as e:  # noqa: BLE001
+        snap["detector_health_error"] = type(e).__name__
     li = aiops.STATUS.get("last_incident") or {}
     if li:
         snap["incident"] = {"window": li.get("window", ""), "all_clear": bool(li.get("all_clear")), "alert": str(li.get("alert", ""))[:240],
@@ -154,6 +164,15 @@ def rule_report(snap):
     for d in snap.get("detectors") or []:
         if d.get("error"):
             findings.append({"task": "overview", "severity": "medium", "title": f"Detector {d.get('id')} fails", "detail": str(d.get("error"))[:300]})
+    dh = snap.get("detector_health") or []
+    waiting = [h for h in dh if "draft-disabled" in h.get("flags", [])]
+    if waiting:
+        findings.append({"task": "overview", "severity": "info", "title": f"{len(waiting)} approved detector draft(s) still disabled",
+                         "detail": "Enable them on the Detectors page, or delete them if they are not needed: " + ", ".join(h["id"] for h in waiting[:6])})
+    for h in dh:
+        if "noisy" in h.get("flags", []):
+            findings.append({"task": "overview", "severity": "low", "title": f"Detector {h['id']} fired {h.get('fired_30d')} times in 30 days",
+                             "detail": "Check whether its filter is too broad or its cooldown too short."})
     inc = snap.get("incident") or {}
     for i in inc.get("issues") or []:
         if not inc.get("all_clear") and i.get("severity") in ("high", "critical"):
@@ -316,9 +335,14 @@ COVERAGE_MAX_FIRINGS = 14         # a javasolt szuro visszatesztje (7 nap, 60 pe
 _SAFE_VAL = re.compile(r"^[A-Za-z0-9_.:@-]{1,64}$")
 
 
-def coverage_input(now=None, dets=None):
+# novelty-forras -> (hoszt-mezo, azonosito-mezo, kiegeszito szuro) a detektor-lekerdezeshez
+NOVELTY_FIELDS = {"syslog": ("host", "appname", "pipeline:syslog"), "journald": ("_HOSTNAME", "SYSLOG_IDENTIFIER", ""), "docker": ("host", "appname", "pipeline:docker")}
+
+
+def coverage_input(now=None, dets=None, store=None):
     """Magas sulyossagu naplocsoportok az elmult COVERAGE_WINDOW_H orabol, amelyekre nem tuzelt riasztas. -> (bemenet, {ref: elem})
-    dets: a meglevo detektorok (akar letiltottak): az a csoport, amelynek hosztjat ES azonositojat egy detektor szuroje megnevezi, mar dontes targya, nem jelolt."""
+    dets: a meglevo detektorok (akar letiltottak): az a csoport, amelynek hosztjat ES azonositojat egy detektor szuroje megnevezi, mar dontes targya, nem jelolt.
+    store: ha van, a hibaszintu nyitott novelty-leletek csoportjai is jeloltek (ritka, de sulyos uj minta / ugras)."""
     dqs = [str(d.get("query", "")).lower() for d in (dets or [])]
     w = COVERAGE_WINDOW_H
     groups = []
@@ -326,6 +350,22 @@ def coverage_input(now=None, dets=None):
         groups.append(("journald", r.get("_HOSTNAME", ""), r.get("SYSLOG_IDENTIFIER", ""), r, "_HOSTNAME", "SYSLOG_IDENTIFIER", "PRIORITY:in(0,1,2,3)"))
     for r in aiops.vl_query(f"_time:{w}h pipeline:syslog severity:in(emerg,alert,crit,err,error) | stats by (host, appname) count() as hits, any(_msg) as sample | sort by (hits desc) | limit 40", timeout=30):
         groups.append(("syslog", r.get("host", ""), r.get("appname", ""), r, "host", "appname", "severity:in(emerg,alert,crit,err,error)"))
+    if store is not None:   # a hibaszintu NYITOTT novelty-leletek (ritka, de sulyos uj minta / ugras) is jeloltek, ha a fenti, szintre szuro lekerdezes nem latta
+        try:
+            have = {(g[0], g[1], g[2]) for g in groups}
+            agg = {}
+            for f in store.nov_findings("open", limit=500):
+                if str(f["level"]).lower() not in _DANGER_LEVELS or f["source"] not in NOVELTY_FIELDS:
+                    continue
+                k = (f["source"], f["host"], f["ident"])
+                if k not in have:
+                    a = agg.setdefault(k, {"hits": 0, "sample": f["tmpl"]})
+                    a["hits"] += int(f["hits"] or 0)
+            for (src, host, ident), r in agg.items():
+                hf, idf, extra = NOVELTY_FIELDS[src]
+                groups.append((src, host, ident, r, hf, idf, extra))
+        except Exception:  # noqa: BLE001 - a bovites hibaja nem akadalyozhatja a feladatot
+            pass
     alerts = [str(a.get("_msg", "")).lower() for a in aiops.vl_query(f"_time:{COVERAGE_ALERT_DAYS}d appname:alert | fields _msg | limit 3000", timeout=30)]
     known = GET_KNOWN() if GET_KNOWN else None
     items, covered = [], 0
@@ -394,6 +434,40 @@ def detector_draft(item, finding, query):
     d = {"id": f"gap-{slug}", "name": f"Gap: {item['host']} / {item['ident']}"[:80], "enabled": False, "query": query, "mode": "count", "threshold": 1,
          "window_min": 60, "cooldown_min": 1440, "group_by": [], "action": "triage", "severity": "medium", "note": "supervisor draft (coverage_gap)"}
     return d if not detectors.validate({"detectors": [d]}) else None
+
+
+_PLACEHOLDER_RX = re.compile(r"<[A-Z*]+>")
+
+
+def finding_detector_draft(f, existing=()):
+    """Determinisztikus detektor-vazlat egy novelty-leletbol (a '+ detector' gomb, modell nelkul): host + azonosito + a sablon leghosszabb allando
+    szovegreszlete idezett kifejezeskent. A szuro csak szukit; a visszateszt es a plafon (check_coverage_query) a hivo dolga.
+    -> (vazlat, lekerdezes); ValueError az okkal, ha nem keszitheto (ismeretlen forras, szokatlan karakterek, mar van ilyen detektor)."""
+    src = f["source"]
+    if src not in NOVELTY_FIELDS:
+        raise ValueError(f"unsupported log source {src!r}")
+    hf, idf, extra = NOVELTY_FIELDS[src]
+    host, ident = str(f["host"]), str(f["ident"])
+    if not (_SAFE_VAL.match(host) and _SAFE_VAL.match(ident)):
+        raise ValueError("the host or identifier contains unusual characters: write the filter by hand on the Detectors page")
+    segs = [s.strip(" \t:;,.-[](){}'\"") for s in _PLACEHOLDER_RX.split(str(f["tmpl"]))]
+    phrase = max(segs, key=len, default="")[:80].rstrip()
+    q = f"{hf}:={host} {idf}:={ident}" + (f" {extra}" if extra else "") + (f' "{detectors._esc(phrase)}"' if len(phrase) >= 8 else "")
+    for e in existing:
+        if str(e.get("query", "")).strip() == q:
+            raise ValueError(f"already covered by detector {e.get('id')}")
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{host}-{ident}".lower()).strip("-")[:30] or "watch"
+    ids = {e.get("id") for e in existing}
+    did = f"pat-{slug}-{hashlib.sha1(q.encode()).hexdigest()[:4]}"
+    if did in ids:
+        raise ValueError(f"already covered by detector {did}")
+    sev = "high" if str(f["level"]).lower() in ("emerg", "alert", "crit", "critical") else "medium"
+    d = {"id": did, "name": f"Watch: {host} / {ident}"[:80], "enabled": False, "query": q, "mode": "count", "threshold": 1, "window_min": 60,
+         "cooldown_min": 1440, "group_by": [], "action": "triage", "severity": sev, "note": "from a new-pattern finding (+ detector)"}
+    errs = detectors.validate({"detectors": [d]})
+    if errs:
+        raise ValueError("; ".join(errs)[:200])
+    return d, q
 
 
 # ---------------------------------------------------------------- zaj-javaslat vedelmei (determinisztikus; a modellnek nem hiszunk)
@@ -811,7 +885,7 @@ def _run_task(name, store, snap, model, now):
     elif name == "coverage_gap":
         try:
             dets = ((store.current("detectors") or {"content": {}})["content"] or {}).get("detectors", [])
-            inp, refs = coverage_input(now, dets)
+            inp, refs = coverage_input(now, dets, store)
         except (OSError, ValueError, http.client.HTTPException) as e:
             raise ModelError(f"log data unavailable ({type(e).__name__})")
         ctx = {"refs": refs}

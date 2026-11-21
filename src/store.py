@@ -270,6 +270,11 @@ class Store:
         with self.lock:
             return [dict(r) for r in self.db.execute(q, args).fetchall()]
 
+    def nov_finding(self, fid):
+        with self.lock:
+            r = self.db.execute("SELECT * FROM nov_findings WHERE id=?", (int(fid),)).fetchone()
+        return dict(r) if r else None
+
     def nov_dismiss(self, fid=None, actor="system"):
         """Egy lelet (vagy mind) elintezettre allitasa. -> az erintett sorok szama"""
         with self.lock:
