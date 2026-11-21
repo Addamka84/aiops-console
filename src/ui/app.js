@@ -285,8 +285,11 @@ function volumePanel() {
 // New log patterns / rate spikes found by the detector (report mode). Everything is rendered as text.
 S.novelty = { data: null, error: '' };
 async function loadNovelty() {
-  try { S.novelty.data = await api('GET', '/api/v1/novelty?status=open&limit=100'); S.novelty.error = ''; } catch (e) { S.novelty.error = e.message; }
+  try { S.novelty.data = await api('GET', '/api/v1/novelty?status=open&limit=500'); S.novelty.error = ''; } catch (e) { S.novelty.error = e.message; }
 }
+// View state of the findings list: level filter (default: warning and above), grouping by host, open groups, rows shown when ungrouped.
+S.novUi = { level: 'warn', group: true, open: {}, shown: 100 };
+const WARN_UP = ['emerg', 'alert', 'crit', 'critical', 'err', 'error', 'warning'];
 const lvlSev = (l) => (['emerg', 'alert', 'crit', 'err', 'error'].includes(l) ? 'high' : l === 'warning' ? 'medium' : 'info');
 async function noveltyDo(fn) {
   try { await fn(); } catch (e) { toast(e.message, true); }
@@ -321,12 +324,44 @@ function noveltyPanel() {
         toast('Proposal #' + r.id + ' created.'); refreshPendingCount();
       }) }, '+ noise'), ' ',
       isAdmin() ? h('button', { class: 'btn', title: 'Mark as reviewed (hides it from this list and the digest)', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/' + x.id + '/dismiss')) }, 'Dismiss') : null));
+  const ui = S.novUi;
+  const redraw = () => pageStatus().catch(() => {});
+  const visible = ui.level === 'all' ? f : f.filter((x) => WARN_UP.includes(x.level));
+  const hidden = f.length - visible.length;
+  const likely = visible.filter((x) => x.likely_noise);
+  const dismissIds = (ids, what) => confirm('Dismiss ' + ids.length + ' finding(s)' + (what ? ' ' + what : '') + '? They disappear from this list and the digest; nothing else changes.')
+    && noveltyDo(() => api('POST', '/api/v1/novelty/dismiss', { ids: ids.slice(0, 500) }));
+  const tbl = (rows) => h('table', {}, h('thead', {}, h('tr', {}, ['Found', 'Kind', 'Level', 'Source', 'Message pattern', 'Count', ''].map((x, i) => h('th', { class: i === 5 ? 'num' : '' }, x)))),
+    h('tbody', {}, rows.map(row)));
+  const byHost = new Map();
+  for (const x of visible) { if (!byHost.has(x.host)) byHost.set(x.host, []); byHost.get(x.host).push(x); }
+  const lvCount = (rows) => Object.entries(rows.reduce((a, x) => (a[x.level] = (a[x.level] || 0) + 1, a), {})).map(([l, c]) => l + ' ' + c).join(' · ');
+  const groups = [...byHost.entries()].sort((a, b) => (b[1].filter((x) => WARN_UP.includes(x.level)).length - a[1].filter((x) => WARN_UP.includes(x.level)).length) || (b[1].length - a[1].length));
+  const group = ([host, rows]) => {
+    const det = h('details', { open: ui.open[host] === undefined ? groups.length <= 2 : ui.open[host], ontoggle: () => { ui.open[host] = det.open; } },
+      h('summary', {}, h('strong', {}, host), ' ', h('span', { class: 'badge b-unknown' }, rows.length), ' ', h('span', { class: 'muted small' }, lvCount(rows)),
+        rows.some((x) => x.likely_noise) ? h('span', { class: 'muted small' }, ' · likely noise ' + rows.filter((x) => x.likely_noise).length) : null,
+        isAdmin() ? h('button', { class: 'btn', style: 'margin-left:8px', title: 'Dismiss every finding of this host in the current view',
+          onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); dismissIds(rows.map((x) => x.id), 'of ' + host); } }, 'Dismiss ' + rows.length) : null),
+      tbl(rows));
+    return det;
+  };
+  const shown = visible.slice(0, ui.shown);
+  const lvlSel = h('select', { 'aria-label': 'Level filter', onchange: () => { ui.level = lvlSel.value; redraw(); } },
+    h('option', { value: 'warn', selected: ui.level === 'warn' }, 'Warning and above'), h('option', { value: 'all', selected: ui.level === 'all' }, 'Everything'));
+  const grpBox = h('input', { type: 'checkbox', checked: ui.group, onchange: () => { ui.group = grpBox.checked; redraw(); } });
   return h('div', { class: 'panel' },
     h('div', { class: 'row' }, title,
-      isAdmin() && f.length > 1 ? h('button', { class: 'btn', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/dismiss-all')) }, 'Dismiss all') : null),
+      isAdmin() && f.length > 1 ? h('button', { class: 'btn', title: 'Dismiss every open finding, including the hidden ones', onclick: () => confirm('Dismiss all ' + f.length + ' open findings (including hidden ones)?') && noveltyDo(() => api('POST', '/api/v1/novelty/dismiss-all')) }, 'Dismiss all (' + f.length + ')') : null),
     h('p', { class: 'muted small' }, info),
-    f.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Found', 'Kind', 'Level', 'Source', 'Message pattern', 'Count', ''].map((x, i) => h('th', { class: i === 5 ? 'num' : '' }, x)))),
-      h('tbody', {}, f.map(row))) : h('p', { class: 'muted' }, st.mode === 'report' ? 'Nothing new. Patterns never seen before, or far above their normal rate, will show up here.' : ''));
+    f.length ? h('div', { class: 'row', style: 'margin-bottom:8px' }, lvlSel, h('label', { class: 'small' }, grpBox, ' group by host'),
+      isAdmin() && likely.length ? h('button', { class: 'btn', title: 'Advisory marks only: review a few first', onclick: () => dismissIds(likely.map((x) => x.id), 'marked likely noise') }, 'Dismiss likely noise (' + likely.length + ')') : null) : null,
+    hidden ? h('p', { class: 'muted small' }, hidden + ' lower-level finding(s) (info, debug, notice) hidden. ',
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); ui.level = 'all'; redraw(); } }, 'Show everything')) : null,
+    visible.length ? (ui.group ? h('div', {}, groups.map(group))
+      : h('div', {}, tbl(shown), visible.length > shown.length ? h('div', { class: 'row', style: 'justify-content:center;margin-top:8px' },
+        h('button', { class: 'btn', onclick: () => { ui.shown += 100; redraw(); } }, 'Show more (' + shown.length + ' of ' + visible.length + ')')) : null))
+      : h('p', { class: 'muted' }, f.length ? 'Nothing at this level.' : (st.mode === 'report' ? 'Nothing new. Patterns never seen before, or far above their normal rate, will show up here.' : '')));
 }
 async function pageStatus() {
   const [s] = await Promise.all([api('GET', '/api/v1/status'), loadStats(false), loadNovelty()]);
@@ -959,6 +994,18 @@ async function pageSettings() {
 }
 
 // ---------------------------------------------------------------- proposals
+// Deterministic evidence for a noise-rule proposal (impact on the baseline and on open findings, flags, examples). Text only.
+function evidenceEl(ev) {
+  if (!ev || !ev.length) return null;
+  return h('div', {}, ev.map((e) => e.error ? h('div', { class: 'err' }, e.error) : h('div', { class: 'panel', style: 'background:var(--bg);margin:8px 0' },
+    h('div', {}, h('strong', {}, 'Impact of this rule'), ' · ' + fmtN(e.templates) + ' pattern(s) in the 7-day baseline, ' + fmtN(e.hits) + ' line(s), ' + e.hosts + ' host(s)'
+      + (e.top_hosts.length ? ' (' + e.top_hosts.map((t) => t.host).join(', ') + ')' : '')),
+    h('div', { class: 'small muted' }, 'levels: ' + (Object.entries(e.levels).map(([l, c]) => l + ' ' + c).join(' · ') || 'none') + ' · open findings it would close: ' + e.covered_open),
+    e.important_templates ? h('div', { class: 'small', style: 'color:var(--warn)' }, e.important_templates + ' covered pattern(s) are error level or worse: check them.') : null,
+    e.attention.length ? h('div', { class: 'small', style: 'color:var(--warn)' }, 'Check carefully: touches ' + e.attention.join(', ') + '.') : null,
+    e.similar_rules.length ? h('div', { class: 'small muted' }, 'Also covered by existing rule(s): ', e.similar_rules.map((s) => [h('code', {}, s), ' '])) : null,
+    e.examples.length ? h('ul', { class: 'small' }, e.examples.map((x) => h('li', { class: 'mono', style: 'word-break:break-word' }, x.host + ' | ' + x.ident + ' | [' + x.level + '] ' + x.text))) : null)));
+}
 async function pageProposals() {
   const PAGE = 50, filter = S.propFilter || 'all';
   const url = (before) => '/api/v1/proposals?limit=' + PAGE + (filter === 'all' ? '' : '&status=' + filter) + (before ? '&before=' + before : '');
@@ -973,10 +1020,12 @@ async function pageProposals() {
     const body = h('div', { class: 'muted small' }, 'Loading diff...');
     const det = h('details', { ontoggle: async () => {
       if (!det.open || det.dataset.loaded) return; det.dataset.loaded = '1';
-      try { const x = await api('GET', '/api/v1/proposals/' + p.id); body.replaceChildren(diffEl(x.diff)); } catch (e) { body.textContent = e.message; }
-    } }, h('summary', {}, 'Show changes'), body);
+      try { const x = await api('GET', '/api/v1/proposals/' + p.id); body.replaceChildren(...[evidenceEl(x.evidence), diffEl(x.diff)].filter(Boolean)); } catch (e) { body.textContent = e.message; }
+    } }, h('summary', {}, 'Show impact and changes'), body);
     return h('div', { class: 'panel' },
-      h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status), p.stale ? h('span', { class: 'badge b-stale', title: p.merge === 'clean' ? 'The configuration changed after this proposal was made; approving merges it onto the newer revision' : 'The configuration changed in the same place: ' + (p.conflicts || []).join(', ') }, p.merge === 'clean' ? 'will merge' : 'conflict') : null,
+      h('div', { class: 'row' }, h('strong', {}, '#' + p.id), h('span', { class: 'badge b-unknown' }, p.key), stateBadge(p.status),
+        p.attention && p.attention.length ? h('span', { class: 'badge b-stale', title: 'The rule text touches security or availability keywords. Open the impact view and read the covered lines before approving. This is a flag, not a verdict.' }, 'check carefully: ' + p.attention.join(', ')) : null,
+        p.stale ? h('span', { class: 'badge b-stale', title: p.merge === 'clean' ? 'The configuration changed after this proposal was made; approving merges it onto the newer revision' : 'The configuration changed in the same place: ' + (p.conflicts || []).join(', ') }, p.merge === 'clean' ? 'will merge' : 'conflict') : null,
         h('span', { class: 'muted small' }, p.author + ' · ' + fmtTime(p.ts) + (p.decided_by ? ' · ' + p.status + ' by ' + p.decided_by : ''))),
       h('p', {}, p.comment), det,
       p.status === 'pending' && isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },

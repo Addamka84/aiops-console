@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 import aiops
 import detectors
+import evidence
 import ingest
 import noisemodel
 import novelty
@@ -25,6 +26,7 @@ import runtime
 import settings
 import supervisor
 import topology
+from redact import redact
 from store import StoreError
 
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
@@ -43,6 +45,10 @@ class Actor:
 class ConfigPut(BaseModel):
     content: dict
     comment: str = Field("", max_length=1000)
+
+
+class DismissIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
 
 
 class ProposalIn(BaseModel):
@@ -454,6 +460,15 @@ def create_app(rt, tokens=None):
             out["conflicts"] = mp["conflicts"]
             if mp["merged"] is not None:
                 proposed = mp["merged"]
+        if p["key"] == "known" and p["status"] == "pending":
+            # Bizonyitek a zajszabaly-javaslathoz (determinisztikus): figyelem-jelzes mindig, hatasvizsgalat a reszletes nezetben.
+            cur_doc = (store.current("known") or {"content": {}})["content"]
+            new_rules = [r for r in proposed.get("noise", []) if r not in cur_doc.get("noise", [])]
+            if new_rules:
+                out["attention"] = evidence.attention(new_rules)
+                if with_diff:
+                    out["evidence"] = evidence.noise_evidence(new_rules, store.nov_pattern_rows(), store.nov_findings("open", limit=500),
+                                                              cur_doc.get("noise", []), redact)
         if with_diff:
             out["diff"] = unified((store.current(p["key"]) or {"content": {}})["content"], proposed)
         return out
@@ -584,6 +599,11 @@ def create_app(rt, tokens=None):
             if sc is not None:
                 f["noise_score"], f["likely_noise"] = sc
         return {"status": novelty.status(store), "findings": rows, "advisor": adv.info()}
+
+    @app.post("/api/v1/novelty/dismiss")
+    def novelty_dismiss_many(body: DismissIn, who: Actor = Depends(admin)):
+        """Tomeges lezaras azonositok szerint (csoport / 'valoszinuleg zaj' gomb); csak a nyitott leleteket erinti."""
+        return {"dismissed": store.nov_dismiss_ids(body.ids, who.name, f"{len(body.ids)} finding(s) (bulk)")}
 
     @app.post("/api/v1/novelty/dismiss-all")
     def novelty_dismiss_all(who: Actor = Depends(admin)):

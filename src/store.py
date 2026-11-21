@@ -281,6 +281,24 @@ class Store:
             self.db.commit()
             return cur.rowcount
 
+    def nov_dismiss_ids(self, ids, actor="system", note=""):
+        """A megadott NYITOTT leletek elintezettre allitasa (tomeges). -> az erintett sorok szama"""
+        ids = [int(i) for i in ids][:500]
+        if not ids:
+            return 0
+        with self.lock:
+            cur = self.db.execute("UPDATE nov_findings SET status='dismissed' WHERE status='open' AND id IN (%s)" % ",".join("?" * len(ids)), ids)
+            if cur.rowcount:
+                self._audit(actor, "novelty.dismiss", (note or f"{cur.rowcount} finding(s)")[:200])
+            self.db.commit()
+            return cur.rowcount
+
+    def nov_pattern_rows(self, limit=60000):
+        """A tarolt minta-alapvonal (host, ident, level, tmpl, total): a zajszabaly-javaslatok hatasvizsgalatahoz."""
+        with self.lock:
+            rs = self.db.execute("SELECT host, ident, level, tmpl, total FROM nov_patterns ORDER BY last_seen DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rs]
+
     def nov_counts(self):
         with self.lock:
             p = self.db.execute("SELECT COUNT(*) AS n FROM nov_patterns").fetchone()["n"]

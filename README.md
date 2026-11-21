@@ -201,3 +201,6 @@ A tiny text classifier (Naive Bayes, standard library only, ~10 microseconds per
 
 ### Proposals paging (v2.0.0-alpha.20)
 The proposals list used to show only the newest 50, so older pending proposals could not be reached in the UI. `GET /api/v1/proposals` now takes `limit` (1-200), `before` (id of the last item of the previous page) and `status`; the Proposals page has a state filter and a *Load older proposals* button.
+
+### Findings list and proposal evidence (v2.0.0-alpha.21)
+New-pattern findings that a noise rule now covers are closed automatically when the rule is approved (the detector already skipped them for new matches). The list defaults to *warning and above* (info/debug are one click away), can be grouped by host with a per-host *Dismiss*, and has *Dismiss likely noise* (advisory marks only, with confirmation; `POST /api/v1/novelty/dismiss` with `{\"ids\": [...]}`). Noise-rule proposals show deterministic evidence instead of a model's opinion: patterns/lines/hosts in the 7-day baseline, levels, the open findings the rule would close, redacted example lines, overlapping existing rules, and a *check carefully* flag when the rule or the covered lines touch security/availability keywords (preauth, denied, OOM, pairing, ...). A flag, not a verdict.

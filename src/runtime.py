@@ -216,6 +216,20 @@ class Runtime:
                 cur = self.store.current("known")
                 self._known = aiops.Known(data=cur["content"])
                 self._known_rev = kid
+                self._cover_findings()
+
+    def _cover_findings(self):
+        """Zajszabaly-valtozas utan a mar nyitott novelty-leletek kozul azokat, amelyekre MOST zajszabaly illeszkedik, lezarja
+        (a detektor az uj leleteket mar szuri; a regi nyitottak kulonben a listan maradnanak). Csak a 'noise' talalat szamit
+        (a snooze ideiglenes, az ismert ugy nem zaj). Hiba nem allithatja meg a szinkront."""
+        try:
+            rows = self.store.nov_findings("open", limit=500)
+            ids = [r["id"] for r in rows if self._known.classify_idx(f"{r['host']} | {r['ident']} | {r['tmpl']}")[0] == "noise"]
+            if ids:
+                n = self.store.nov_dismiss_ids(ids, "system", f"{len(ids)} open finding(s) now covered by a noise rule")
+                aiops.log(f"novelty: {n} nyitott lelet lezarva (a zajszabalyok mar lefedik)")
+        except Exception as e:  # noqa: BLE001
+            aiops.log(f"novelty: automatikus lezaras sikertelen: {type(e).__name__}: {e}")
 
     def get_known(self):
         self.sync()
