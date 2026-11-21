@@ -143,7 +143,7 @@ async function render() {
   }
 }
 async function refreshPendingCount() {
-  try { S.proposalsPending = (await api('GET', '/api/v1/proposals?status=pending')).length; } catch (e) { /* ignore */ }
+  try { S.proposalsPending = (await api('GET', '/api/v1/proposals?status=pending&limit=200')).length; } catch (e) { /* ignore */ }
 }
 
 function renderLogin(msg) {
@@ -960,8 +960,11 @@ async function pageSettings() {
 
 // ---------------------------------------------------------------- proposals
 async function pageProposals() {
-  const all = await api('GET', '/api/v1/proposals');
-  S.proposalsPending = all.filter((p) => p.status === 'pending').length;
+  const PAGE = 50, filter = S.propFilter || 'all';
+  const url = (before) => '/api/v1/proposals?limit=' + PAGE + (filter === 'all' ? '' : '&status=' + filter) + (before ? '&before=' + before : '');
+  const all = await api('GET', url());
+  let more = all.length === PAGE;
+  S.proposalsPending = (await api('GET', '/api/v1/proposals?status=pending&limit=200')).length;
   const decide = async (id, what, force) => {
     try { await api('POST', '/api/v1/proposals/' + id + '/' + what + (force ? '?force=true' : '')); toast('Proposal #' + id + ' ' + what + 'd.'); S.draft = null; render(); }
     catch (e) { toast(e.message, true); }
@@ -981,9 +984,17 @@ async function pageProposals() {
         p.stale && p.merge !== 'clean' ? h('button', { class: 'btn', onclick: () => confirm('Conflicting changes in ' + (p.conflicts || []).join(', ') + '. Apply the proposal as written? This overwrites the newer changes there.') && decide(p.id, 'approve', true) }, 'Approve anyway (overwrite)') : null,
         h('button', { class: 'btn danger', onclick: () => decide(p.id, 'reject') }, 'Reject')) : null);
   };
-  renderShell([h('h2', {}, 'Proposals'),
+  const sel = h('select', { 'aria-label': 'Filter by state', onchange: () => { S.propFilter = sel.value; render(); } },
+    ['all', 'pending', 'approved', 'rejected'].map((v) => h('option', { value: v, selected: v === filter }, v === 'all' ? 'All states' : v + (v === 'pending' ? ' (' + S.proposalsPending + ')' : ''))));
+  const draw = () => renderShell([h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, 'Proposals'), sel),
     !isAdmin() ? h('div', { class: 'note' }, 'You are signed in with a read token: you can create proposals, an admin approves them.') : null,
-    all.length ? all.map(card) : h('p', { class: 'muted' }, 'No proposals yet.')]);
+    all.length ? all.map(card) : h('p', { class: 'muted' }, filter === 'all' ? 'No proposals yet.' : 'No ' + filter + ' proposals.'),
+    more ? h('div', { class: 'row', style: 'justify-content:center' }, h('button', { class: 'btn', onclick: async (ev) => {
+      ev.target.disabled = true;
+      try { const next = await api('GET', url(all[all.length - 1].id)); all.push(...next); more = next.length === PAGE; draw(); }
+      catch (e) { toast(e.message, true); ev.target.disabled = false; }
+    } }, 'Load older proposals (shown ' + all.length + ')')) : null]);
+  draw();
 }
 
 // ---------------------------------------------------------------- supervisor (read-only periodic review by a separate model; reports only)

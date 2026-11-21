@@ -459,8 +459,10 @@ def create_app(rt, tokens=None):
         return out
 
     @app.get("/api/v1/proposals")
-    def list_proposals(status_: str | None = Query(None, alias="status"), _: Actor = Depends(read)):
-        return [prop_view(p, with_diff=False) for p in store.proposals(status_)]
+    def list_proposals(status_: str | None = Query(None, alias="status", pattern="^(pending|approved|rejected)$"),
+                       limit: int = Query(50, ge=1, le=200), before: int | None = Query(None, ge=1), _: Actor = Depends(read)):
+        """Legujabb elol; lapozas: before=<az elozo oldal utolso azonositoja>."""
+        return [prop_view(p, with_diff=False) for p in store.proposals(status_, limit, before)]
 
     @app.get("/api/v1/proposals/{pid}")
     def get_proposal(pid: int, _: Actor = Depends(read)):

@@ -117,12 +117,17 @@ class Store:
             self.db.commit()
             return cur.lastrowid
 
-    def proposals(self, status=None, limit=50):
+    def proposals(self, status=None, limit=50, before=None):
+        """Legujabb elol (id szerint csokkeno); before: csak az ennel kisebb azonositoju javaslatok (lapozas)."""
+        q, args = "SELECT * FROM proposals WHERE 1=1", []
+        if status:
+            q += " AND status=?"
+            args.append(status)
+        if before is not None:
+            q += " AND id<?"
+            args.append(int(before))
         with self.lock:
-            if status:
-                rows = self.db.execute("SELECT * FROM proposals WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
-            else:
-                rows = self.db.execute("SELECT * FROM proposals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = self.db.execute(q + " ORDER BY id DESC LIMIT ?", args + [int(limit)]).fetchall()
         return [self._prop(r) for r in rows]
 
     def proposal(self, pid):
