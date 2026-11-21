@@ -108,7 +108,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.22"
+__version__ = "2.0.0-alpha.23"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -885,7 +885,10 @@ def alert_evidence(job, known, t_from, t_to):
         return {"kept": [], "suppressed": suppressed, "total": total}   # minden elem zaj: az incidens kimarad
     if not kept:
         return None            # egyes elemeknek nincs (elerheto) bizonyitéka: nem allapithato meg, hogy zaj
-    return {"kept": kept, "suppressed": suppressed, "total": total}
+    # A legsulyosabb journald-prioritas: csak akkor ismert, ha MINDEN elem bizonyitekanak van (detektor / ismeretlen -> nincs plafon).
+    prios = [r.get("prio") if r else None for r in results]
+    prio = min(prios) if prios and all(p is not None for p in prios) else None
+    return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio}
 
 
 def item_evidence(job, known, t_from, t_to):
@@ -914,25 +917,31 @@ def item_evidence(job, known, t_from, t_to):
     if not targets:
         return None
     kept, suppressed, total = [], 0, 0
+    prio = None            # a legkisebb (legsulyosabb) PRIORITY a megtartott soroknal; 3 = err, <=2 = crit/alert/emerg
     try:
         for lab in targets:
             q = (f'_time:[{iso(t_from)}, {iso(t_to)}] _HOSTNAME:"{lab["host"]}" SYSLOG_IDENTIFIER:"{lab["SYSLOG_IDENTIFIER"]}" '
-                 f"PRIORITY:in(0,1,2,3) | collapse_nums | stats by (_msg) count() as hits | sort by (hits desc) | limit 8")
+                 f"PRIORITY:in(0,1,2,3) | collapse_nums | stats by (_msg) count() as hits, min(PRIORITY) as prio | sort by (hits desc) | limit 8")
             for x in vl_query(q):
                 try:
                     n = int(x.get("hits", 0) or 0)
                 except ValueError:
                     n = 0
+                try:
+                    p = int(x.get("prio"))
+                except (TypeError, ValueError):
+                    p = 0          # ismeretlen prioritas: a legsulyosabbnak vesszuk (nincs plafon)
                 msg = str(x.get("_msg", ""))
                 total += n
                 if known.classify_idx(f"{lab['host']} | {lab['SYSLOG_IDENTIFIER']} | {msg}")[0] == "keep":
                     kept.append(f"{lab['host']} | {lab['SYSLOG_IDENTIFIER']} | {n}x | {cut(msg, 200)}")
+                    prio = p if prio is None else min(prio, p)
                 else:
                     suppressed += n
     except (OSError, ValueError) as e:
         log(f"riasztas-bizonyitek lekerdezese sikertelen: {e}", key="alert_evidence")
         return None
-    return {"kept": kept, "suppressed": suppressed, "total": total}
+    return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio}
 
 
 def run_job(job, known, pool, dry_run=False):
@@ -1001,12 +1010,15 @@ def run_job(job, known, pool, dry_run=False):
     secs = round(time.monotonic() - t0, 1)
     issues, dropped = known.post_filter(out["issues"])
     issues, ungrounded = ground_issues(issues, user)
+    issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known))
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
-        "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded,
+        "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded, "guard_notes": guard_notes,
     }
+    if guard_notes:
+        result["summary"] = f"[guard: {'; '.join(guard_notes)}] {result['summary']}"
     if job["kind"] == "incident":
         result["alert"] = redact(job.get("alert_text", ""))
         result["alert_key"] = job.get("key", "")
@@ -1042,6 +1054,55 @@ def ground_issues(issues, user):
     if removed:
         log(f"megalapozas: {removed} a bemenetben nem szereplo nev eltavolitva a modell kimenetebol", key="grounding")
     return out, removed
+
+
+_PROPER_RX = re.compile(r"(?:(?<=[\w,] )|(?<=\())[A-Z][A-Za-z0-9]{3,}")
+
+
+def vocabulary(known):
+    """Azok a nevek, amelyeket a modell a LAB FACTS-bol / topologiabol 'tud', de a naplo nem feltetlen emlit (pl. Immich, Plex).
+    Csak ez a keszlet vizsgalhato megbizhatoan: egy tetszoleges szo nem mondhato meg, hogy 'szolgaltatasnev'-e."""
+    terms = set()
+    for line in getattr(known, "context", []) or []:
+        terms.update(t.lower() for t in _PROPER_RX.findall(" " + line))
+    if TOPOLOGY:
+        for aid, a in TOPOLOGY.assets.items():
+            for v in (aid, a.get("name"), a.get("role")):
+                for t in re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", str(v or "")):
+                    if any(c.isdigit() for c in t) or not t.islower():   # azonositok (homesrv3), Nevek; a kozonseges szavak kimaradnak
+                        terms.add(t.lower())
+    return terms
+
+
+def guard_severity(issues, user, evidence, vocab):
+    """Determinisztikus vedelem a modell sulyossaga ellen (modellfuggetlen). Ket szabaly:
+    1) csak err-szintu (journald PRIORITY 3) bizonyitek: legfeljebb 'medium' (a 'critical'/'high' crit/alert/emerg sort kivan);
+    2) a kimenet olyan, a lab-tenyek/topologia nevei kozul valo szolgaltatast nevez meg, amely a bemenetben nem szerepel: legfeljebb 'low'.
+    -> (ugyek, megjegyzesek). Az ugy megmarad, a bizonyiteka latszik; a megjegyzes a jelentes elejere kerul."""
+    low = user.lower()
+    notes = []
+    out = []
+    err_only = bool(evidence) and evidence.get("prio") is not None and evidence["prio"] >= 3
+    for i in issues:
+        text = " ".join(str(i.get(k, "")) for k in ("title", "evidence", "likely_cause", "suggested_action")).lower()
+        words = set(re.findall(r"[a-z][a-z0-9]{3,}", text))
+        bad = sorted(t for t in vocab & words if t not in low)
+        cap = None
+        if err_only:
+            cap = "medium"
+        if bad:
+            cap = "low"
+        sev = i.get("severity", "info")
+        if cap and sev in SEVERITIES and SEVERITIES.index(sev) > SEVERITIES.index(cap):
+            i = dict(i, severity=cap)
+            notes.append(f"severity {sev} -> {cap}: " + (f"not in the evidence: {', '.join(bad)}" if bad else "evidence is error-level only"))
+        elif bad:
+            notes.append(f"not in the evidence: {', '.join(bad)}")
+        out.append(i)
+    notes = list(dict.fromkeys(notes))
+    if notes:
+        log(f"vedelem: {len(notes)} megjegyzes ({'; '.join(notes)})", key="guard_severity")
+    return out, notes
 
 
 def max_severity(issues):
@@ -1119,6 +1180,7 @@ def to_events(result):
         "stats": json.dumps(result.get("stats") or {}, ensure_ascii=False, separators=(",", ":")),
     }
     head["ungrounded_hosts"] = str(result.get("ungrounded_hosts", 0))
+    head["guard_notes"] = " | ".join(result.get("guard_notes") or [])
     if result["kind"] == "incident":
         head["alert"] = result.get("alert", "")
         if result.get("correlation"):
