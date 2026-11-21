@@ -108,7 +108,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.24"
+__version__ = "2.0.0-alpha.25"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1010,7 +1010,7 @@ def run_job(job, known, pool, dry_run=False):
     secs = round(time.monotonic() - t0, 1)
     issues, dropped = known.post_filter(out["issues"])
     issues, ungrounded = ground_issues(issues, user)
-    issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known))
+    issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job))
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
@@ -1076,10 +1076,24 @@ def vocabulary(known):
     return terms - GENERIC_TERMS
 
 
-def guard_severity(issues, user, evidence, vocab):
-    """Determinisztikus vedelem a modell sulyossaga ellen (modellfuggetlen). Ket szabaly:
+def detector_cap(job):
+    """Detektor-riasztas altal kiváltott incidensnel a detektor BEALLITOTT sulyossaga a plafon (a modell nem emelheti fole: a detektor
+    szuk, ember altal irt feltetel, a modell 'kovetkezmeny'-allitasait nem tamasztja ala tobb bizonyitek). Csomagnal (tobb riasztas) csak akkor,
+    ha MINDEN elem detektoros; akkor a legmagasabb beallitott sulyossag. -> sulyossag vagy None."""
+    items = job.get("items") or [job]
+    dets = [it.get("detector") for it in items]
+    if not dets or not all(dets):
+        return None
+    sevs = [d.get("severity", "medium") for d in dets if d.get("severity", "medium") in SEVERITIES]
+    return max(sevs, key=SEVERITIES.index) if sevs else None
+
+
+def guard_severity(issues, user, evidence, vocab, det_cap=None):
+    """Determinisztikus vedelem a modell sulyossaga ellen (modellfuggetlen). Harom szabaly:
     1) csak err-szintu (journald PRIORITY 3) bizonyitek: legfeljebb 'medium' (a 'critical'/'high' crit/alert/emerg sort kivan);
-    2) a kimenet olyan, a lab-tenyek/topologia nevei kozul valo szolgaltatast nevez meg, amely a bemenetben nem szerepel: legfeljebb 'low'.
+    2) a kimenet olyan, a lab-tenyek/topologia nevei kozul valo szolgaltatast nevez meg, amely a bemenetben nem szerepel: legfeljebb 'low';
+    3) detektoros incidens: legfeljebb a detektor beallitott sulyossaga (det_cap). Minden ugyre vonatkozik, a hatrany: egy kozben talalt, fuggetlen
+       sulyosabb problema is ide korlatozodik (a napi osszefoglalo viszont a valos sulyossaggal jelzi).
     -> (ugyek, megjegyzesek). Az ugy megmarad, a bizonyiteka latszik; a megjegyzes a jelentes elejere kerul."""
     low = user.lower()
     notes = []
@@ -1089,15 +1103,16 @@ def guard_severity(issues, user, evidence, vocab):
         text = " ".join(str(i.get(k, "")) for k in ("title", "evidence", "likely_cause", "suggested_action")).lower()
         words = set(re.findall(r"[a-z][a-z0-9]{3,}", text))
         bad = sorted(t for t in vocab & words if t not in low)
-        cap = None
-        if err_only:
-            cap = "medium"
-        if bad:
-            cap = "low"
+        cap, why = None, ""
+        for c, w in (("medium" if err_only else None, "evidence is error-level only"),
+                     (det_cap, f"above the detector's configured severity ({det_cap})"),
+                     ("low" if bad else None, f"not in the evidence: {', '.join(bad)}")):
+            if c and (cap is None or SEVERITIES.index(c) < SEVERITIES.index(cap)):
+                cap, why = c, w
         sev = i.get("severity", "info")
         if cap and sev in SEVERITIES and SEVERITIES.index(sev) > SEVERITIES.index(cap):
             i = dict(i, severity=cap)
-            notes.append(f"severity {sev} -> {cap}: " + (f"not in the evidence: {', '.join(bad)}" if bad else "evidence is error-level only"))
+            notes.append(f"severity {sev} -> {cap}: {why}")
         elif bad:
             notes.append(f"not in the evidence: {', '.join(bad)}")
         out.append(i)

@@ -75,6 +75,31 @@ class GuardTests(unittest.TestCase):
         out, _ = aiops.guard_severity([issue(sev="info")], USER, {"kept": ["x"], "prio": 3}, self.vocab)
         self.assertEqual(out[0]["severity"], "info")
 
+    def test_detector_cap_is_the_configured_severity_for_detector_incidents(self):
+        det = lambda s: {"detector": {"severity": s}}      # noqa: E731
+        self.assertEqual(aiops.detector_cap({"items": [det("medium")]}), "medium")
+        self.assertEqual(aiops.detector_cap({"detector": {"severity": "low"}}), "low")
+        self.assertEqual(aiops.detector_cap({"items": [det("low"), det("high")]}), "high")      # csomag: a legmagasabb beallitott
+        self.assertIsNone(aiops.detector_cap({"items": [det("medium"), {"detector": None}]}))  # nem minden elem detektoros: nincs plafon
+        self.assertIsNone(aiops.detector_cap({"items": [{"alert_labels": []}]}))
+
+    def test_guard_caps_to_the_detector_severity(self):
+        out, notes = aiops.guard_severity([issue(title="NAS timeout")], USER, {"kept": ["x"], "prio": None}, self.vocab, "medium")
+        self.assertEqual(out[0]["severity"], "medium")
+        self.assertIn("detector's configured severity (medium)", notes[0])
+        out, _ = aiops.guard_severity([issue(title="NAS timeout", sev="low")], USER, {"kept": ["x"], "prio": None}, self.vocab, "medium")
+        self.assertEqual(out[0]["severity"], "low")                                              # sosem emel
+        out, _ = aiops.guard_severity([issue(title="NAS timeout")], USER, None, self.vocab, None)
+        self.assertEqual(out[0]["severity"], "critical")                                         # nem detektoros: nincs plafon
+
+    def test_lowest_cap_wins_and_names_its_reason(self):
+        out, notes = aiops.guard_severity([issue()], USER, {"kept": ["x"], "prio": 3}, self.vocab, "high")
+        self.assertEqual(out[0]["severity"], "low")                       # a bizonyitatlan 'immich' a legszigorubb
+        self.assertIn("immich", notes[0])
+        out, notes = aiops.guard_severity([issue(title="SSH reset")], USER, {"kept": ["x"], "prio": 3}, self.vocab, "high")
+        self.assertEqual(out[0]["severity"], "medium")                    # err-szint (medium) szigorubb, mint a detektor (high)
+        self.assertIn("error-level only", notes[0])
+
     def test_alert_evidence_combines_priorities_only_when_all_known(self):
         saved = aiops.item_evidence
         try:
