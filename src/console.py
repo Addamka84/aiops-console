@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 import aiops
 import detectors
 import ingest
+import noisemodel
 import novelty
 import runtime
 import settings
@@ -104,6 +105,7 @@ def create_app(rt, tokens=None):
     if tokens is None:
         tokens = {"read": os.environ.get("CONSOLE_READ_TOKEN", "").strip(), "admin": os.environ.get("CONSOLE_ADMIN_TOKEN", "").strip()}
     store = rt.store
+    noisemodel.ADVISOR.attach(store)
     app = FastAPI(title="aiops-console", version="1.0", description="Configuration and control API of the aiops service.")
 
     for name_, tok_ in tokens.items():
@@ -571,7 +573,15 @@ def create_app(rt, tokens=None):
     def novelty_list(status: str = Query("open", pattern="^(open|dismissed|all)$"), limit: int = Query(100, ge=1, le=500),
                      _: Actor = Depends(read)):
         """Uj mintak es gyakorisag-ugrasok a naplokban + a detektor allapota (alapvonal, utolso futas, hiba)."""
-        return {"status": novelty.status(store), "findings": store.nov_findings(None if status == "all" else status, limit=limit)}
+        rows = store.nov_findings(None if status == "all" else status, limit=limit)
+        adv = noisemodel.ADVISOR
+        adv.ensure()                      # a hatterben tanul; kesz modell nelkul a leletek pontszam nelkul jonnek
+        known = rt.get_known()
+        for f in rows:
+            sc = adv.score(f, known)
+            if sc is not None:
+                f["noise_score"], f["likely_noise"] = sc
+        return {"status": novelty.status(store), "findings": rows, "advisor": adv.info()}
 
     @app.post("/api/v1/novelty/dismiss-all")
     def novelty_dismiss_all(who: Actor = Depends(admin)):

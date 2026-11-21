@@ -81,6 +81,7 @@ CFG = {
     "DETECTOR_INTERVAL_S": _env_int("DETECTOR_INTERVAL_S", 60),                  # mp: ennyi idonkent ertekeli ki az osszes detektort
     # Riasztas-korrelacio a topologian at (correlation.py): a rokon riasztasok egy incidensbe vonasa
     "CORRELATE_MODE": os.environ.get("CORRELATE_MODE", "on"),                    # on | off
+    "NOISE_ADVISOR": os.environ.get("NOISE_ADVISOR", "on"),                      # on | off: "valoszinuleg zaj" tanacs a novelty-leleteken (noisemodel.py; csak jelzes, nem szur)
     "CORRELATE_SETTLE_S": _env_int("CORRELATE_SETTLE_S", 90),                    # mp: ennyit vár az utolso rokon riasztas utan, mielott az incidens indul
     "CORRELATE_WINDOW_MIN": _env_int("CORRELATE_WINDOW_MIN", 10),                # perc: ennyin belul erkezo riasztasok lehetnek rokonok
     # Modell-API: ollama (alap) | openai (OpenAI-kompatibilis: vLLM, NIM, llama.cpp-szerver...). A kulcs CSAK kornyezeti valtozo.
@@ -107,7 +108,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.18"
+__version__ = "2.0.0-alpha.19"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 

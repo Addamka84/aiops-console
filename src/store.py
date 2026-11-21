@@ -195,6 +195,12 @@ class Store:
                     out[r["key"]] = dict(r)
         return out
 
+    def nov_training_rows(self, limit=40000):
+        """A zaj-tanacsado tanitopeldai: a legutobb latott mintak (host, ident, level, tmpl, source)."""
+        with self.lock:
+            rs = self.db.execute("SELECT source, host, ident, level, tmpl FROM nov_patterns ORDER BY last_seen DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rs]
+
     def nov_upsert(self, rows):
         """rows: dict-ek (key, source, host, ident, level, tmpl, first_seen, last_seen, total, since, last_spike).
         Letezo kulcsnal: az elso latas a kisebb, az utolso a nagyobb, az osszeg novekszik, a tobbi mezo marad."""

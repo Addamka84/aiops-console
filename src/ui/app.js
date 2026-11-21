@@ -302,14 +302,18 @@ function noveltyPanel() {
     : st.backfill === 'running' ? 'Building the baseline from stored logs, findings start afterwards.'
       : [fmtN(st.patterns) + ' patterns in the baseline', st.last_scan ? 'last scan ' + fmtTime(st.last_scan) : 'first scan pending',
         learning ? 'learning until ' + fmtTime(st.learning_until) + ' (no findings yet)' : '',
-        st.error ? 'last error: ' + st.error : '', st.truncated && st.truncated.length ? 'very many distinct messages in: ' + st.truncated.join(', ') : ''].filter(Boolean).join(' · ');
+        st.error ? 'last error: ' + st.error : '', st.truncated && st.truncated.length ? 'very many distinct messages in: ' + st.truncated.join(', ') : '',
+        n.advisor && n.advisor.state === 'ready' ? 'noise advisor: ' + f.filter((x) => x.likely_noise).length + ' of ' + f.length + ' marked likely noise (advisory)'
+          : n.advisor && (n.advisor.state === 'learning' || n.advisor.state === 'training') ? 'noise advisor is learning'
+            : n.advisor && n.advisor.state === 'insufficient' ? 'noise advisor: not enough labelled patterns yet' : ''].filter(Boolean).join(' · ');
   const text = (x) => x.host + ' | ' + x.ident + ' | ' + x.tmpl;
   const row = (x) => h('tr', {},
     h('td', { class: 'small nowrap' }, fmtTime(x.ts)),
     h('td', {}, h('span', { class: 'badge sev-' + (x.kind === 'spike' ? 'medium' : 'low') }, x.kind)),
     h('td', {}, h('span', { class: 'badge sev-' + lvlSev(x.level) }, x.level)),
     h('td', { class: 'small' }, x.host, h('div', { class: 'muted' }, x.ident)),
-    h('td', { class: 'mono small', style: 'word-break:break-word' }, x.tmpl),
+    h('td', { class: 'mono small', style: 'word-break:break-word' }, x.tmpl,
+      x.likely_noise ? h('div', {}, h('span', { class: 'badge sev-low', title: 'Advisory only (score ' + x.noise_score + '): similar to lines your noise rules already cover. Nothing is filtered; review it, then add a rule or dismiss.' }, 'likely noise')) : null),
     h('td', { class: 'num small nowrap' }, fmtN(x.hits) + 'x', x.kind === 'spike' ? h('div', { class: 'muted' }, 'usual ~' + x.baseline) : null),
     h('td', { class: 'nowrap' },
       h('button', { class: 'btn', title: 'Propose a noise rule for this line (review it on the Proposals page)', onclick: () => noveltyDo(async () => {

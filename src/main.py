@@ -31,6 +31,8 @@ def main():
         return aiops.run_once(args.once, rt.get_known(), args.hours, args.dry_run)
 
     import uvicorn
+    import noisemodel
+    noisemodel.ADVISOR.attach(rt.store)
     threading.Thread(target=aiops.service_loop, args=(rt.get_known, rt.store), daemon=True, name="aiops-worker").start()
     uvicorn.run(console.create_app(rt), host="0.0.0.0", port=aiops.CFG["STATUS_PORT"], log_level="warning", access_log=False)
     return 0

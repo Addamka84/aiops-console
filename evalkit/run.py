@@ -3,6 +3,7 @@
   python -m evalkit report  --data DIR --known known.json [--window 600] [--settle 90] [--cooldown 1800] [--json out.json] [--html out.html [--candidate known2.json]]
   python -m evalkit compare --data DIR --base known.json --candidate known2.json
   python -m evalkit bench   --data DIR --known known.json [--sizes 100,200,400]
+  python -m evalkit noise-model --data DIR --known known.json [--json out.json]   (advisory noise classifier: threshold, held-out noise cut, latency, must_keep gate)
   python -m evalkit import  --source dynatrace --input export.jsonl --out events.jsonl [--adapter ingest.json]   (tool export -> common schema, severity normalised)
 A kimenet angol (munkahelyi bemutatasra is szant); a kod es a megjegyzesek magyarok. Kilepesi kod: 0 = a kapu atment, 2 = a biztonsagi kapu elbukott.
 """
@@ -121,6 +122,53 @@ def cmd_bench(a):
     return 0
 
 
+def cmd_noise_model(a):
+    """Zaj-tanacsado merese: sablonok (host, ident, szint, szam-maszkolt uzenet) a zajszabalyokbol tanitva; kuszob = csoportos keresztvalidacio.
+    Ismert igazsag (label) eseten: hany must_keep / noise sablon esik a kuszob fole (a modell sajat tanitoadatan: optimista, tajekoztato).
+    Kapu (2-es kilepesi kod): ha egy must_keep cimkeju sablon 'valoszinuleg zaj' jelzest kapna."""
+    import collections
+    import re
+    import time
+    import noisemodel  # noqa: E402
+    ev, _topo, _ = _load(a.data)
+    known = metrics.load_known(a.known)
+    doc = json.load(open(a.known, encoding="utf-8-sig"))
+    agg = {}
+    for e in ev:
+        k = (e["host"], e["ident"], e["level"], re.sub(r"\d+", "<N>", e["msg"]))
+        r = agg.setdefault(k, {"source": e["source"], "host": k[0], "ident": k[1], "level": k[2], "tmpl": k[3], "hits": 0, "labels": collections.Counter()})
+        r["hits"] += 1
+        if e.get("label"):
+            r["labels"][e["label"]] += 1
+    rows = list(agg.values())
+    m = noisemodel.train(rows, known, doc.get("must_keep", []), a.min_noise, a.min_important)
+    print(f"== Noise advisor: {len(ev):,} events -> {len(rows):,} templates")
+    if not m.get("ready"):
+        print("   no model: " + m["reason"])
+        return 0
+    model, tau = m["model"], m["tau"]
+    print(f"   trained on {m['n_noise']} noise-rule templates and {m['n_important']} error-or-worse templates; threshold {tau:.1f} "
+          f"(highest score of any held-out important line or must_keep sample, grouped 5-fold CV, {m['cv_secs']} s)")
+    print(f"   held-out noise templates above the threshold (would be marked 'likely noise'): {m['cv_noise_cut']:.0%}")
+    t0 = time.perf_counter()
+    scored = [(r, model.score(noisemodel.feats(r["ident"], r["level"], r["tmpl"]))) for r in rows]
+    us = (time.perf_counter() - t0) / max(len(rows), 1) * 1e6
+    print(f"   scoring: {us:.0f} microseconds per template (pure Python, one core)")
+    bad = 0
+    if any(r["labels"] for r in rows):
+        def n_above(lbl):
+            sel = [(r, s) for r, s in scored if r["labels"].get(lbl)]
+            return sum(1 for r, s in sel if s > tau and r["level"] not in noisemodel.IMPORTANT), len(sel)
+        mk, mk_n = n_above("must_keep")
+        nz, nz_n = n_above("noise")
+        bad = mk
+        print(f"   ground truth (in-sample, informative only): noise templates marked {nz}/{nz_n}; must_keep templates marked {mk}/{mk_n}  <- must be 0")
+    if a.json:
+        json.dump({"templates": len(rows), "n_noise": m["n_noise"], "n_important": m["n_important"], "tau": tau, "cv_noise_cut": m["cv_noise_cut"],
+                   "us_per_template": round(us, 1), "must_keep_marked": bad}, open(a.json, "w"), indent=1)
+    return 2 if bad else 0
+
+
 def cmd_import(a):
     """Egy eszkoz JSONL-exportja -> a kozos sema (events.jsonl): mezoleképezes + sulyossag-normalizalas. Cimke / incidens nincs: a biztonsagi
     mutatok csak cimkezes utan szamolhatok. Az eredmeny helyi fajl; a munkahelyi adat nem kerulhet a repoba."""
@@ -190,13 +238,19 @@ def main(argv=None):
     b.add_argument("--sizes", default="100,400,1600,6400,25000")
     b.add_argument("--cis-per-item", type=int, default=1, help="assets named per event; 3 = worst case (almost every event has a unique asset set)")
     b.add_argument("--repeat", type=int, default=1)
+    n = sub.add_parser("noise-model")
+    n.add_argument("--data", required=True)
+    n.add_argument("--known", required=True)
+    n.add_argument("--json", help="write the numbers to this file")
+    n.add_argument("--min-noise", type=int, default=200, help="minimum noise-rule templates to train (the live default is 200)")
+    n.add_argument("--min-important", type=int, default=50)
     i = sub.add_parser("import")
     i.add_argument("--source", required=True, help="tool code, e.g. dynatrace")
     i.add_argument("--input", required=True, help="JSONL export of the tool")
     i.add_argument("--out", required=True)
     i.add_argument("--adapter", help="ingest document (JSON): severity map and field paths per tool")
     a = ap.parse_args(argv)
-    return {"synth": cmd_synth, "report": cmd_report, "compare": cmd_compare, "bench": cmd_bench, "import": cmd_import}[a.cmd](a)
+    return {"synth": cmd_synth, "report": cmd_report, "compare": cmd_compare, "bench": cmd_bench, "noise-model": cmd_noise_model, "import": cmd_import}[a.cmd](a)
 
 
 if __name__ == "__main__":

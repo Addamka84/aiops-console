@@ -262,9 +262,19 @@ def noise_input(store):
     """Nyitott novelty-leletek a zajkarbantartashoz. -> (bemenet, {ref: sablon}, [(szint, sablon)] az osszes nyitott leletrol)
     A mar zajnak / szuneteltetesnek / ismert ugynek minosulo leletek (a regi nyitott leletek a szabaly felvetele elott keletkeztek) nem kerulnek
     a modellhez: nincs ertelme ujra zajt javasolni rajuk (kvotat fogyasztana); a vedelmek kontextusa viszont az OSSZES nyitott lelet marad."""
-    rows = store.nov_findings("open", limit=max(10, aiops.CFG["SUPERVISOR_MAX_ITEMS"]))
+    cap = max(10, aiops.CFG["SUPERVISOR_MAX_ITEMS"])
+    import noisemodel  # kesve: a noisemodel az aiops-ot importalja
+    adv = noisemodel.ADVISOR
+    adv.ensure()
+    rows = store.nov_findings("open", limit=min(500, cap * 5) if adv.enabled() else cap)
     known = GET_KNOWN() if GET_KNOWN else None
     fresh = [f for f in rows if known is None or known.classify_idx(f"{f['host']} | {f['ident']} | {f['tmpl']}")[0] == "keep"]
+    if adv.enabled():
+        # Tanacsado: a legvaloszinubb zaj kerul a modell elé (a feladat eloszuresi vedelmei valtozatlanok); modell nelkul a sorrend marad.
+        sc = {f["id"]: adv.score(f, known) for f in fresh}
+        if any(sc.values()):
+            fresh.sort(key=lambda f: -(sc[f["id"]][0] if sc[f["id"]] else -1e9))
+    fresh = fresh[:cap]
     items = [{"ref": f"n{f['id']}", "kind": f["kind"], "host": f["host"], "ident": f["ident"], "level": f["level"], "hits": f["hits"],
               "template": str(f["tmpl"])[:300]} for f in fresh]
     full = lambda f: f"{f['host']} | {f['ident']} | {f['tmpl']}"   # ugyanaz a szoveg, amire a zajlista az elo osztalyozasnal fut

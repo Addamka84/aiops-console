@@ -195,3 +195,6 @@ like any other change; the Proposals page shows "will merge" / "conflict" and th
 
 ### Severity & ingest page, demo model (v2.0.0-alpha.17)
 New *Severity & ingest* page and a *Never suppress* panel in the UI (see the notes above); the demo environment ships a deterministic stand-in model so the incident flow runs without a real LLM.
+
+### Noise advisor (v2.0.0-alpha.19)
+A tiny text classifier (Naive Bayes, standard library only, ~10 microseconds per pattern) trained on your own noise rules marks new patterns as *likely noise* and lets the Supervisor start with the most likely candidates. **Advisory only:** it never filters, never creates a rule, and never marks error-level lines, `must_keep` samples or known issues. The threshold comes from grouped cross-validation (the highest score of any held-out important line). Switch: `NOISE_ADVISOR=on|off` (Settings page). Measure it with `python -m evalkit noise-model --data DIR --known known.json`. Measured on real logs: 46 of 50 hand-labelled suggestions were noise, 0 were not (4 unsure), but it only covers the long tail (~5% of the unlabelled volume) and cannot guarantee that an unseen critical line survives, so it is not a filter. Details: `docs/aiops-merokeret.md`.

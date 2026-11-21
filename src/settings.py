@@ -43,6 +43,7 @@ SPEC = {
     "FLAP_WINDOW_H": {"type": "int", "min": 1, "max": 48, "desc": "Window for counting repeated firings of one alert (hours)."},
     "FLAP_COOLDOWN_MIN": {"type": "int", "min": 30, "max": 1440, "desc": "Cooldown of a flapping alert between incident analyses (minutes)."},
     "CORRELATE_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "Alert correlation through the topology: related alerts become ONE incident with a root-cause hypothesis (on | off)."},
+    "NOISE_ADVISOR": {"type": "choice", "choices": ["on", "off"], "desc": "Advisory 'likely noise' hint on new patterns, from a small text classifier trained on your own noise rules (on | off). It only ranks and labels: it never filters, never creates a rule, and never marks error-level lines, must-keep lines or known issues."},
     "CORRELATE_SETTLE_S": {"type": "int", "min": 10, "max": 900, "desc": "How long to wait after the last related alert before the incident analysis starts (s)."},
     "CORRELATE_WINDOW_MIN": {"type": "int", "min": 1, "max": 120, "desc": "Alerts arriving within this many minutes can be related (minutes)."},
     "NOVELTY_SPIKE_MIN": {"type": "int", "min": 10, "max": 1000000, "desc": "...and at least this many lines occurred in one scan window."},
