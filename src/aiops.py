@@ -108,7 +108,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.23"
+__version__ = "2.0.0-alpha.24"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1056,6 +1056,9 @@ def ground_issues(issues, user):
     return out, removed
 
 
+GENERIC_TERMS = {"home", "assistant", "network", "remote", "server", "media", "cloud", "supervisor", "backup", "docker", "linux", "debian", "ubuntu",
+                 "router", "storage", "camera", "cameras", "production", "internet", "public", "private", "access", "service", "services",
+                 "matter", "tube", "uptime", "intel", "dell", "raspberry", "nvidia"}
 _PROPER_RX = re.compile(r"(?:(?<=[\w,] )|(?<=\())[A-Z][A-Za-z0-9]{3,}")
 
 
@@ -1065,13 +1068,12 @@ def vocabulary(known):
     terms = set()
     for line in getattr(known, "context", []) or []:
         terms.update(t.lower() for t in _PROPER_RX.findall(" " + line))
-    if TOPOLOGY:
-        for aid, a in TOPOLOGY.assets.items():
-            for v in (aid, a.get("name"), a.get("role")):
-                for t in re.findall(r"[A-Za-z][A-Za-z0-9]{3,}", str(v or "")):
-                    if any(c.isdigit() for c in t) or not t.islower():   # azonositok (homesrv3), Nevek; a kozonseges szavak kimaradnak
-                        terms.add(t.lower())
-    return terms
+    if TOPOLOGY:    # csak a szamjegyet tartalmazo azonositok (homesrv3, plex1): az altalanos szavak (network, remote, home) hamis jelzest adnanak
+        for aid in TOPOLOGY.assets:
+            for t in re.findall(r"[A-Za-z][A-Za-z0-9]{4,}", str(aid)):
+                if any(c.isdigit() for c in t):
+                    terms.add(t.lower())
+    return terms - GENERIC_TERMS
 
 
 def guard_severity(issues, user, evidence, vocab):

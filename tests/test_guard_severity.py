@@ -31,6 +31,20 @@ class GuardTests(unittest.TestCase):
         self.assertIn("plex", self.vocab)
         self.assertNotIn("nihil", self.vocab)       # a sor eleji gepnev nem 'tulajdonnev' a szabaly szerint
 
+    def test_generic_words_from_topology_and_context_are_not_service_names(self):
+        import topology
+        saved = aiops.TOPOLOGY
+        aiops.TOPOLOGY = topology.Topology({"assets": [{"id": "smrt-remote-guest", "name": "Remote", "role": "network device (remote access)", "type": "device"},
+                                                       {"id": "homesrv3", "name": "homesrv3", "type": "host"}]})
+        try:
+            v = aiops.vocabulary(type("K2", (), {"context": ["homesrv3: Network storage and Remote access (Plex, Matter bridge)."]})())
+        finally:
+            aiops.TOPOLOGY = saved
+        self.assertIn("homesrv3", v)
+        self.assertIn("plex", v)
+        for generic in ("network", "remote", "storage", "access", "matter", "guest"):
+            self.assertNotIn(generic, v)
+
     def test_unsupported_service_caps_to_low_and_notes_it(self):
         out, notes = aiops.guard_severity([issue()], USER, {"kept": ["x"], "prio": 0}, self.vocab)
         self.assertEqual(out[0]["severity"], "low")
