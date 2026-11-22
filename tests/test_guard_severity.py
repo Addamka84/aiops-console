@@ -100,6 +100,25 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(out[0]["severity"], "medium")                    # err-szint (medium) szigorubb, mint a detektor (high)
         self.assertIn("error-level only", notes[0])
 
+    def test_thin_cap_only_for_incidents_without_alert_evidence_and_few_lines(self):
+        inc = {"kind": "incident", "alert_labels": [{"alertname": "SyslogSourceSilent"}]}
+        self.assertIsNone(aiops.thin_cap({"kind": "incident", "alert_labels": [{"alertname": "KumaDown"}]}, None, {"kept_lines": 1}))   # nem elhallgatas-riasztas
+        self.assertIsNone(aiops.thin_cap({"kind": "incident", "alert_labels": [{"alertname": "SyslogSourceSilent"}, {"alertname": "X"}]}, None, {"kept_lines": 1}))
+        self.assertIsNone(aiops.thin_cap({"kind": "incident"}, None, {"kept_lines": 1}))         # nincs riasztas-cimke
+        self.assertEqual(aiops.thin_cap(inc, None, {"kept_lines": 4}), "medium")
+        self.assertEqual(aiops.thin_cap(inc, None, {"kept_lines": aiops.THIN_LINES}), "medium")
+        self.assertIsNone(aiops.thin_cap(inc, None, {"kept_lines": aiops.THIN_LINES + 1}))       # sok sor: nem vekony
+        self.assertIsNone(aiops.thin_cap(inc, {"kept": ["x"], "prio": None}, {"kept_lines": 1}))  # van sor-szintu bizonyitek
+        self.assertIsNone(aiops.thin_cap({"kind": "digest"}, None, {"kept_lines": 1}))           # napi osszefoglalo: nincs plafon
+        self.assertIsNone(aiops.thin_cap(inc, None, {}))                                         # ismeretlen darabszam: nincs plafon
+
+    def test_guard_caps_thin_evidence_to_medium(self):
+        out, notes = aiops.guard_severity([issue(sev="high", title="DB failure")], USER, None, self.vocab, None, "medium")
+        self.assertEqual(out[0]["severity"], "medium")
+        self.assertIn("thin evidence", notes[0])
+        out, _ = aiops.guard_severity([issue(sev="low", title="DB failure")], USER, None, self.vocab, None, "medium")
+        self.assertEqual(out[0]["severity"], "low")                                              # sosem emel
+
     def test_alert_evidence_combines_priorities_only_when_all_known(self):
         saved = aiops.item_evidence
         try:

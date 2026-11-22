@@ -108,7 +108,7 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
 }
-__version__ = "2.0.0-alpha.25"
+__version__ = "2.0.0-alpha.26"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1010,7 +1010,7 @@ def run_job(job, known, pool, dry_run=False):
     secs = round(time.monotonic() - t0, 1)
     issues, dropped = known.post_filter(out["issues"])
     issues, ungrounded = ground_issues(issues, user)
-    issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job))
+    issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job), thin_cap(job, evidence, stats))
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
@@ -1088,8 +1088,26 @@ def detector_cap(job):
     return max(sevs, key=SEVERITIES.index) if sevs else None
 
 
-def guard_severity(issues, user, evidence, vocab, det_cap=None):
-    """Determinisztikus vedelem a modell sulyossaga ellen (modellfuggetlen). Harom szabaly:
+THIN_LINES = 5     # ennyi vagy kevesebb megtartott (nem zaj, nem ismert) naplosor az ablakban = vekony bizonyitek
+
+
+SILENCE_ALERTS = {"SyslogSourceSilent", "DockerLogsSilent", "JournaldSilent"}   # naplo-elhallgatas riasztasok: a sorok nem a riasztasrol szolnak
+
+
+def thin_cap(job, evidence, stats):
+    """Incidensnel, ha CSAK naplo-elhallgatas riasztas (SILENCE_ALERTS) valtotta ki, ahhoz nincs sor-szintu bizonyitek, es az ablakban is csak par
+    megtartott sor van: az ezekbol szuletett, a riasztastol fuggetlen 'high' nem alapozhato meg (2026-11-22: egyetlen [Warning] 'Aborted connection'
+    sorbol 'high' lett). -> 'medium' vagy None. Mas riasztasnal (pl. Kuma 'szolgaltatas all') nincs plafon; a riasztas sajat sulyossagat
+    (vmalert notify: direct) ez nem erinti."""
+    labels = job.get("alert_labels") or []
+    if job.get("kind") != "incident" or evidence is not None or not labels or any(lab.get("alertname") not in SILENCE_ALERTS for lab in labels):
+        return None
+    kept = (stats or {}).get("kept_lines")
+    return "medium" if isinstance(kept, int) and kept <= THIN_LINES else None
+
+
+def guard_severity(issues, user, evidence, vocab, det_cap=None, thin=None):
+    """Determinisztikus vedelem a modell sulyossaga ellen (modellfuggetlen). Negy szabaly (a 4.: thin = thin_cap(...), vekony bizonyitek -> 'medium'):
     1) csak err-szintu (journald PRIORITY 3) bizonyitek: legfeljebb 'medium' (a 'critical'/'high' crit/alert/emerg sort kivan);
     2) a kimenet olyan, a lab-tenyek/topologia nevei kozul valo szolgaltatast nevez meg, amely a bemenetben nem szerepel: legfeljebb 'low';
     3) detektoros incidens: legfeljebb a detektor beallitott sulyossaga (det_cap). Minden ugyre vonatkozik, a hatrany: egy kozben talalt, fuggetlen
@@ -1106,6 +1124,7 @@ def guard_severity(issues, user, evidence, vocab, det_cap=None):
         cap, why = None, ""
         for c, w in (("medium" if err_only else None, "evidence is error-level only"),
                      (det_cap, f"above the detector's configured severity ({det_cap})"),
+                     (thin, "thin evidence: no line-level evidence for the alert and only a few log lines in the window"),
                      ("low" if bad else None, f"not in the evidence: {', '.join(bad)}")):
             if c and (cap is None or SEVERITIES.index(c) < SEVERITIES.index(cap)):
                 cap, why = c, w

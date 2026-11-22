@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   aiops:
-    image: ${AIOPS_IMAGE:-ghcr.io/addamka84/aiops-console:v2.0.0-alpha.25}
+    image: ${AIOPS_IMAGE:-ghcr.io/addamka84/aiops-console:v2.0.0-alpha.26}
     environment:
       TZ: UTC
       VL_URL: http://victorialogs:9428
