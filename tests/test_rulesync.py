@@ -103,7 +103,7 @@ class SyncCase(unittest.TestCase):
         aiops.CFG.update(VMALERT_URL=self.vm.url, RULES_DIR=self.dir, RULES_SYNC="on", RULES_SYNC_TIMEOUT_S=5)
         rulesync.FAIL_FAST_S, rulesync.POLL_S = 0, 0.05
         self.queries = []
-        aiops.vl_query = lambda q, timeout=None: self.queries.append(q) or []
+        aiops.vl_query = lambda q, timeout=None, **kw: self.queries.append((q, kw)) or []
         self.path = os.path.join(self.dir, rules.FILE_NAME)
 
     def tearDown(self):
@@ -133,7 +133,7 @@ class ApplyTests(SyncCase):
         self.assertEqual(self.vm.reloads, 1)
         self.assertEqual([f for f in os.listdir(self.dir)], [rules.FILE_NAME])        # nincs ideiglenes fajl
         self.assertEqual(len(self.queries), 2)                                          # a szaraz futtatas minden szabalyra lefutott
-        self.assertTrue(self.queries[0].startswith("_time:1m (pipeline:docker)"))
+        self.assertTrue(self.queries[0][0].startswith("_time:1m (pipeline:docker)"))
 
     def test_second_apply_of_the_same_revision_is_a_no_op_unless_forced(self):
         doc = {"rules": [rule()]}
@@ -158,7 +158,7 @@ class ApplyTests(SyncCase):
         self.assertEqual(self.vm.reloads, 0)
 
     def test_victorialogs_rejection_stops_the_apply_before_any_write(self):
-        def reject(q, timeout=None):
+        def reject(q, timeout=None, **kw):
             raise urllib.error.HTTPError("http://vl", 400, "Bad Request", {}, None)
         aiops.vl_query = reject
         st = rulesync.apply({"rules": [rule()]}, 2)
@@ -168,7 +168,7 @@ class ApplyTests(SyncCase):
         self.assertEqual(self.vm.reloads, 0)
 
     def test_victorialogs_down_stops_the_apply(self):
-        def down(q, timeout=None):
+        def down(q, timeout=None, **kw):
             raise urllib.error.URLError("refused")
         aiops.vl_query = down
         st = rulesync.apply({"rules": [rule()]}, 2)
@@ -176,11 +176,28 @@ class ApplyTests(SyncCase):
         self.assertIn("not reachable", st["message"])
         self.assertFalse(os.path.exists(self.path))
 
-    def test_slow_dry_run_is_not_an_error(self):
-        def slow(q, timeout=None):
+    def test_slow_dry_run_is_an_error(self):              # alpha.30 (audit M3): egy percenkent futo, 20 mp-nel lassabb szabaly nem mehet ki
+        def slow(q, timeout=None, **kw):
             raise TimeoutError("slow")
         aiops.vl_query = slow
-        self.assertEqual(rulesync.apply({"rules": [rule()]}, 2)["state"], "ok")
+        st = rulesync.apply({"rules": [rule()]}, 2)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("dry run took over", st["message"])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_dry_run_is_time_bounded_and_row_limited(self):
+        doc = {"rules": [rule(), {"id": "Raw", "kind": "raw", "interval_min": 5, "expr": "a | stats count() as n"},
+                         {"id": "Quiet", "kind": "silence", "query": "pipeline:syslog", "group_by": ["host"], "window_min": 15}]}
+        rulesync.apply(doc, 3)
+        spans = [round((kw["end"] - kw["start"]).total_seconds() / 60) for _, kw in self.queries]
+        self.assertEqual(spans, [1, 5, 24 * 60])                     # count: window, raw: interval, silence: history
+        self.assertTrue(all(q.endswith(f"| limit {rulesync.DRY_MAX_SERIES + 1}") and kw["max_bytes"] for q, kw in self.queries))
+
+    def test_too_many_result_rows_is_an_alert_flood(self):
+        aiops.vl_query = lambda q, timeout=None, **kw: [{"hits": 1}] * (rulesync.DRY_MAX_SERIES + 1)
+        st = rulesync.apply({"rules": [rule()]}, 2)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("alert flood", st["message"])
 
     def test_failed_reload_restores_the_previous_file_and_keeps_the_old_state(self):
         good = {"rules": [rule()]}

@@ -3,6 +3,7 @@
 Dokumentumkulcsok: 'known' (zaj + ismert ugyek + labor-tenyek), 'settings' (felulirasok).
 Minden iras uj verzio (a regi megmarad, visszaallithato). Titkok SOHA nem kerulnek ide.
 """
+import datetime as dt
 import json
 import sqlite3
 import threading
@@ -342,9 +343,23 @@ class Store:
         return out
 
     # ---- audit
+    AUDIT_KEEP_DAYS = 400        # az audit-naplo IDO szerint forog (korabban 2000 sor: egy read token kiszorithatta az admin-bejegyzeseket; audit M6)
+    AUDIT_MAX_ROWS = 500000      # vedokorlat a tar meretere
+
     def _audit(self, actor, action, detail):
         self.db.execute("INSERT INTO audit (ts, actor, action, detail) VALUES (?,?,?,?)", (now_iso(), actor, action, detail))
-        self.db.execute("DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 2000)")
+        if time.monotonic() - getattr(self, "_audit_pruned", -1e9) >= 3600:      # a takaritas legfeljebb orankent fut
+            self._audit_pruned = time.monotonic()
+            cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.AUDIT_KEEP_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.db.execute("DELETE FROM audit WHERE ts < ?", (cutoff,))
+            self.db.execute("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - ?", (self.AUDIT_MAX_ROWS,))
+
+    def count_pending(self, role):
+        """Fuggo javaslatok szama egy SZEREPKORBOL (a szerzo 'read' vagy 'read:<cimke>'): a cimke (X-Actor) szabadon valaszthato, ezert a korlat
+        a szerepkorre vonatkozik, nem a cimkere (audit M6). COUNT, nem a javaslatok betoltese."""
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending' AND (author = ? OR author LIKE ?)",
+                                   (role, role + ":%")).fetchone()[0]
 
     def audit(self, actor, action, detail=""):
         with self.lock:

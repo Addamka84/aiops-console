@@ -46,9 +46,20 @@ def check_query(q):
         return "query must not contain ';' outside quotes"
     if re.search(r"(^|[\s(])_time\s*:", bare):
         return "do not use _time in the query: the window setting does that"
-    if bare.count("(") != bare.count(")"):
-        return "unbalanced parentheses in the query"
+    if not parens_ok(bare):
+        return "unbalanced parentheses in the query (a ')' may not close more than was opened: the query is wrapped in its own parentheses)"
     return None
+
+
+def parens_ok(bare):
+    """A zarojelek sorrendben is egyensulyban vannak (a melyseg sosem negativ). Kulonben pl. 'x) OR (y' kilepne a burkolo zarojelbol, es az
+    'OR' ag az idoablakon KIVUL keresne (audit M1). A szovegeket ("...") a hivo mar kivagta."""
+    depth = 0
+    for ch in bare:
+        depth += 1 if ch == "(" else -1 if ch == ")" else 0
+        if depth < 0:
+            return False
+    return depth == 0
 
 
 def validate(doc):

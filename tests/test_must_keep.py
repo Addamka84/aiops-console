@@ -38,7 +38,7 @@ class MustKeepTests(unittest.TestCase):
 
     def test_supervisor_rejects_regex_matching_must_keep(self):
         refs = [HB]
-        rx = r"dynatrace \| (OneAgent heartbeat OK|Problem P-<N>: Host unavailable)"
+        rx = r"esx-01 \| dynatrace \| \S+ "          # a heartbeatre es a kritikus sorra is illeszkedik (alternacio nelkul: alpha.30)
         self.assertIsNone(supervisor.check_noise_regex(rx, refs, []))                    # must_keep nelkul atmenne
         reason = supervisor.check_noise_regex(rx, refs, [], [CRIT])
         self.assertIn("must_keep", reason or "")

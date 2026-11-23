@@ -92,7 +92,8 @@ class RegexGuardTests(unittest.TestCase):
 
     def test_validate_known_checks_snoozes_and_known_issues_too(self):
         regex_guard._OK.clear()
-        doc = {"snoozes": [{"id": "s", "regex": r"(a+)+$", "until": "2099-01-01T00:00:00Z"}]}
+        soon = aiops.iso(aiops.utcnow() + aiops.dt.timedelta(days=1))         # a 90 napos plafon a teljes dokumentumra is el (alpha.30)
+        doc = {"snoozes": [{"id": "s", "regex": r"(a+)+$", "until": soon}]}
         self.assertTrue(any("catastrophic" in e for e in aiops.validate_known(doc)))
         regex_guard._OK.clear()
         doc = {"known_issues": [{"id": "k", "note": "n", "match": r"(x+x+)+y"}]}
@@ -102,8 +103,11 @@ class RegexGuardTests(unittest.TestCase):
         for rx in (r"avahi-daemon (Withdrawing|Registering)+ address", r"homesrv (\w|\d)* connection reset"):
             reason = supervisor.check_noise_regex(rx, ["homesrv | avahi-daemon | Withdrawing address"], [])
             self.assertIn("alternation", reason or "", rx)
-        # az (x|y) onmagaban (nem ismetelve) tovabbra is megengedett
-        self.assertIsNone(supervisor.check_noise_regex(r"avahi-daemon \| (Withdrawing|Registering) address record", ["homesrv | avahi-daemon | Withdrawing address record for x"], []))
+        # alpha.30 (audit M4): a modell zaj-regexeben semmilyen alternacio nem lehet (egy '(zaj|Failed password for)' mas kritikus sort is elnyelne);
+        # a szam-helyorzo (?:<N>|\d+) kivetel. Kezzel irt szabalyban az alternacio tovabbra is megengedett (validate_known).
+        self.assertIn("alternation", supervisor.check_noise_regex(r"avahi-daemon \| (Withdrawing|Registering) address record", ["homesrv | avahi-daemon | Withdrawing address record for x"], []) or "")
+        self.assertIsNone(supervisor.check_noise_regex(r"avahi-daemon \| Withdrawing address record for (?:<N>|\d+)", ["homesrv | avahi-daemon | Withdrawing address record for <N>"], []))
+        self.assertEqual(aiops.validate_known({"noise": [r"\| avahi-daemon \| (Withdrawing|Registering) address record"]}), [])
 
 
 class CoverageShapeTests(unittest.TestCase):

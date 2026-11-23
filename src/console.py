@@ -34,7 +34,7 @@ from store import StoreError
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
 MAX_BODY = 262144          # a kerestest legfeljebb ennyi bajt (a legnagyobb dokumentum, a topologia, ennel joval kisebb)
 AUTH_FAIL_LIMIT = 10       # hibas tokenes proba / perc / kliens-cim: efelett 429 (a helyes tokenes keres tovabbra is atmegy)
-MAX_PENDING_PER_ACTOR = 100  # egy szereplo legfeljebb ennyi fuggo javaslatot hagyhat
+MAX_PENDING_PER_ACTOR = 100  # egy SZEREPKOR (read / admin) legfeljebb ennyi fuggo javaslatot hagyhat (a cimke szabadon valaszthato: audit M6)
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 
@@ -482,8 +482,8 @@ def create_app(rt, tokens=None):
             doc = runtime.validate_doc("detectors", dict(cur, detectors=dets + [d]))
         except runtime.DocError as e:
             fail(e)
-        if sum(1 for p in store.proposals("pending", 1000) if p["author"] == who.name) >= MAX_PENDING_PER_ACTOR:
-            raise HTTPException(429, f"too many pending proposals from {who.name} (limit {MAX_PENDING_PER_ACTOR})")
+        if store.count_pending(who.role) >= MAX_PENDING_PER_ACTOR:
+            raise HTTPException(429, f"too many pending proposals from the {who.role} role (limit {MAX_PENDING_PER_ACTOR})")
         comment = (f"+ detector from finding #{fid} ({f['host']} / {f['ident']}). Filter: {query}. "
                    f"{bt['hours'] // 24}-day backtest: {bt['firings']} firing(s), {bt['total']} matching line(s).")
         pid = store.add_proposal("detectors", doc, who.name, comment, store.revision_id("detectors"))
@@ -511,8 +511,8 @@ def create_app(rt, tokens=None):
         check_key(body.key)
         if (body.content is None) == (body.patch is None):
             raise HTTPException(422, {"errors": ["give exactly one of content or patch"]})
-        if sum(1 for p in store.proposals("pending", 1000) if p["author"] == who.name) >= MAX_PENDING_PER_ACTOR:
-            raise HTTPException(429, f"too many pending proposals from {who.name} (limit {MAX_PENDING_PER_ACTOR})")
+        if store.count_pending(who.role) >= MAX_PENDING_PER_ACTOR:
+            raise HTTPException(429, f"too many pending proposals from the {who.role} role (limit {MAX_PENDING_PER_ACTOR})")
         cur = (store.current(body.key) or {"content": {}})["content"]
         try:
             if body.content is not None:

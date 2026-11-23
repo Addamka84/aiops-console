@@ -229,6 +229,9 @@ class OpenAITests(Base):
         aiops.CFG["SUPERVISOR_API"] = "openai"
         aiops.CFG["SUPERVISOR_MODEL"] = "big"
         aiops.CFG["SUPERVISOR_TASKS"] = ["overview"]
+        self.saved_allow = aiops.CFG.get("ALLOWED_LLM_HOSTS", [])
+        aiops.CFG["ALLOWED_LLM_HOSTS"] = ["127.0.0.1"]           # a kulcs csak engedelyezett hosztra megy (alpha.30)
+        self.addCleanup(aiops.CFG.__setitem__, "ALLOWED_LLM_HOSTS", self.saved_allow)
 
     def run_with(self, **kw):
         calls = []

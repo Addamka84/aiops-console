@@ -88,6 +88,9 @@ CFG = {
     # Modell-API: ollama (alap) | openai (OpenAI-kompatibilis: vLLM, NIM, llama.cpp-szerver...). A kulcs CSAK kornyezeti valtozo.
     "LLM_API": os.environ.get("LLM_API", "ollama"),
     "LLM_API_KEY": os.environ.get("LLM_API_KEY", "").strip(),
+    # Hova mehet az API-kulcs (LLM_API_KEY, SUPERVISOR_KEY): a kornyezeti valtozoban megadott vegpontok hosztjai + ez a lista (host vagy host:port,
+    # vesszovel). A konzolban atallitott URL-re a kulcs NEM megy (audit M7); ha a lista nem ures, a beallitasok csak ezekre a hosztokra engednek URL-t.
+    "ALLOWED_LLM_HOSTS": [h.strip().lower() for h in os.environ.get("ALLOWED_LLM_HOSTS", "").split(",") if h.strip()],
     # Flapping-szures a riasztasokra: ugyanaz a riasztas FLAP_COUNT-szor tuzelt FLAP_WINDOW_H ora alatt -> hosszabb szuneteltetes (kritikus nem)
     "FLAP_COUNT": _env_int("FLAP_COUNT", 4),                                     # 0 = kikapcsolva
     "FLAP_WINDOW_H": _env_int("FLAP_WINDOW_H", 6),
@@ -115,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.29"
+__version__ = "2.0.0-alpha.30"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -198,11 +201,20 @@ def iso(t):
 
 # ---------------------------------------------------------------- VictoriaLogs
 
-def vl_query(q, timeout=None):
-    data = urllib.parse.urlencode({"query": q}).encode()
-    req = urllib.request.Request(CFG["VL_URL"] + "/select/logsql/query", data=data)
+def vl_query(q, timeout=None, start=None, end=None, max_bytes=None):
+    """LogsQL lekerdezes. start/end (datetime): a VictoriaLogs-oldali idokorlat (a lekerdezes szovegetol fuggetlenul is korlatoz);
+    max_bytes: a valasz felso merete (tullepeskor ValueError, a valasz nem kerul teljesen a memoriaba)."""
+    args = {"query": q}
+    if start is not None:
+        args["start"] = iso(start)
+    if end is not None:
+        args["end"] = iso(end)
+    req = urllib.request.Request(CFG["VL_URL"] + "/select/logsql/query", data=urllib.parse.urlencode(args).encode())
     with urllib.request.urlopen(req, timeout=timeout or CFG["VL_TIMEOUT"]) as r:
-        body = r.read().decode("utf-8", "replace")
+        raw = r.read() if max_bytes is None else r.read(max_bytes + 1)
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise ValueError(f"VictoriaLogs response larger than {max_bytes} bytes")
+    body = raw.decode("utf-8", "replace")
     return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
@@ -382,8 +394,12 @@ def validate_known(d):
                     re.compile(rx)
                 except re.error as e:
                     errs.append(f"snoozes[{i}].regex: invalid regex ({e})")
-            if parse_until(s.get("until")) is None:
+            until = parse_until(s.get("until"))
+            if until is None:
                 errs.append(f"snoozes[{i}]: 'until' must be a UTC time like 2026-01-31T12:00:00Z")
+            elif until > utcnow().replace(tzinfo=None) + dt.timedelta(hours=SNOOZE_MAX_HOURS + 1):
+                # a 90 napos plafon a teljes dokumentumra is (korabban csak a javaslat-patch utjan; audit L1): tartos nemitasra a zajszabaly valo
+                errs.append(f"snoozes[{i}]: a snooze is limited to 90 days; use a noise rule for permanent muting")
             if "note" in s and not isinstance(s["note"], str):
                 errs.append(f"snoozes[{i}]: 'note' must be a string")
     if not errs:   # katasztrofalis visszalepes (ReDoS) elleni proba: a regexek kulon alfolyamatban, idokorlattal (regex_guard.py)
@@ -394,7 +410,16 @@ def validate_known(d):
         if bad:
             errs.append(bad)
         else:   # a regexek biztonsagosak: egyik se nyelje el a must_keep mintasorokat (a kapu masodik vedvonala: a kezi PUT-ra es a jovahagyasra is vonatkozik)
-            for label, rx in [(f"noise[{i}]", x) for i, x in enumerate(d.get("noise", []))] + [(f"snoozes[{i}]", s["regex"]) for i, s in enumerate(d.get("snoozes", []))]:
+            # az ismert ugyek 'match' regexe is elnyel sorokat (a modell bemenetebol es a bizonyitekbol): nem lehet mindenre illeszkedo (audit L1).
+            # Egy KONKRET hibas eszkoz ismert ugye illeszkedhet must_keep-szeru sorra (pl. a cserere varo lemez SMART-hibaja), ezert itt a
+            # gazdagep- es eszkozfuggetlen altalanos mintasorokat nezzuk, nem a must_keep listat.
+            for i, k in enumerate(d.get("known_issues", [])):
+                if isinstance(k, dict) and isinstance(k.get("match"), str):
+                    gen = [c for c in GENERIC_CANARIES if re.search(k["match"], c, re.I)]
+                    if gen:
+                        errs.append(f"known_issues[{i}].match: too broad, it matches generic text ({gen[0]!r}); name the host / unit / device")
+            pairs = [(f"noise[{i}]", x) for i, x in enumerate(d.get("noise", []))] + [(f"snoozes[{i}]", s["regex"]) for i, s in enumerate(d.get("snoozes", []))]
+            for label, rx in pairs:
                 hit = must_keep_conflict(rx, d.get("must_keep", []))
                 if hit:
                     errs.append(f"{label}: matches a must_keep line ({hit[:80]!r}); critical events must never be suppressed")
@@ -419,6 +444,10 @@ def must_keep_conflict(rx, lines):
 
 UNTIL_FMT = "%Y-%m-%dT%H:%M:%SZ"
 SNOOZE_MAX_HOURS = 24 * 90
+# Gazdagep-, egyseg- es eszkozfuggetlen altalanos naplosorok: egy ismert ugy nem illeszkedhet rajuk (akkor mindenre illeszkedne; audit L1)
+GENERIC_CANARIES = ("ERROR: something failed", "x", "a b c 1 2 3", "kernel: Out of memory: Killed process 1234 (app)", "CRITICAL unhandled exception in worker",
+                    "sshd[1]: Accepted publickey for root from 10.0.0.1 port 22", "sudo: alice : TTY=pts/0 ; USER=root ; COMMAND=/bin/sh",
+                    "systemd[1]: app.service: Failed with result 'exit-code'.")
 
 
 def parse_until(v):
@@ -674,8 +703,30 @@ def _http(url, method, path, body=None, timeout=5, headers=None):
         conn.close()
 
 
-def _auth():
-    return {"Authorization": "Bearer " + CFG["LLM_API_KEY"]} if CFG["LLM_API_KEY"] else {}
+def _hostport(url):
+    p = urllib.parse.urlsplit(url or "")
+    host = (p.hostname or "").lower()
+    return host, f"{host}:{p.port}" if p.port else host
+
+
+def llm_host_allowed(url):
+    """Az URL hosztja a kornyezeti valtozoban rogzitett vegpontok kozott van, vagy az ALLOWED_LLM_HOSTS listaban."""
+    host, hp = _hostport(url)
+    if not host:
+        return False
+    fixed = {x for u in list(ENV_CFG.get("OLLAMA_URLS") or []) + [ENV_CFG.get("SUPERVISOR_URL") or ""] for x in _hostport(u) if x}
+    allow = set(CFG.get("ALLOWED_LLM_HOSTS") or [])
+    return host in fixed or hp in fixed or host in allow or hp in allow
+
+
+def _auth(url=None):
+    """Bearer fejlec az LLM_API_KEY-jel, de CSAK engedelyezett hosztra (audit M7): egy jovahagyott URL-csere nem viheti el a kulcsot."""
+    if not CFG["LLM_API_KEY"]:
+        return {}
+    if url is not None and not llm_host_allowed(url):
+        log(f"az API-kulcs nem megy ide (nem engedelyezett hoszt; ALLOWED_LLM_HOSTS): {_hostport(url)[1]}", key=("nokey", url))
+        return {}
+    return {"Authorization": "Bearer " + CFG["LLM_API_KEY"]}
 
 
 class EndpointPool:
@@ -691,7 +742,7 @@ class EndpointPool:
         openai = CFG["LLM_API"] == "openai"
         try:
             status, raw = _http(ep["url"], "GET", "/v1/models" if openai else "/api/tags", timeout=CFG["PROBE_TIMEOUT"],
-                                headers=_auth() if openai else None)
+                                headers=_auth(ep["url"]) if openai else None)
         except (OSError, http.client.HTTPException) as e:
             return False, f"nem elerheto ({type(e).__name__})"
         if status != 200:
@@ -795,7 +846,7 @@ def _openai_chat(ep_url, system, user):
     for fmt in attempts:
         body = json.dumps(dict(base, response_format=fmt)).encode("utf-8")
         try:
-            status, raw = _http(ep_url, "POST", "/v1/chat/completions", body, timeout=CFG["GEN_TIMEOUT"], headers=_auth())
+            status, raw = _http(ep_url, "POST", "/v1/chat/completions", body, timeout=CFG["GEN_TIMEOUT"], headers=_auth(ep_url))
         except (OSError, http.client.HTTPException) as e:
             raise OllamaError(f"hivas sikertelen ({type(e).__name__}: {e})")
         if status in (400, 422) and fmt is schema_fmt:
@@ -925,14 +976,17 @@ def alert_evidence(job, known, t_from, t_to):
     kept = [x for r in results if r for x in r["kept"]][:14]
     suppressed = sum(r["suppressed"] for r in results if r)
     total = sum(r["total"] for r in results if r)
-    if all(r is not None and r["total"] > 0 and not r["kept"] for r in results):
-        return {"kept": [], "suppressed": suppressed, "total": total}   # minden elem zaj: az incidens kimarad
+    if all(r is not None and r["total"] > 0 and not r["kept"] and not r.get("incomplete") for r in results):
+        return {"kept": [], "suppressed": suppressed, "total": total}   # minden elem zaj, a lista teljes, nincs elnyelt crit sor: az incidens kimarad
     if not kept:
         return None            # egyes elemeknek nincs (elerheto) bizonyitéka: nem allapithato meg, hogy zaj
     # A legsulyosabb journald-prioritas: csak akkor ismert, ha MINDEN elem bizonyitekanak van (detektor / ismeretlen -> nincs plafon).
     prios = [r.get("prio") if r else None for r in results]
     prio = min(prios) if prios and all(p is not None for p in prios) else None
     return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio}
+
+
+EVIDENCE_ROWS = 8      # a bizonyitek-lekerdezes sorkorlatja; ha eleri, a lista csonka lehet (a valodi sort zaj kiszorithatta)
 
 
 def item_evidence(job, known, t_from, t_to):
@@ -946,7 +1000,8 @@ def item_evidence(job, known, t_from, t_to):
         import detectors
         kept, suppressed, total = [], 0, 0
         try:
-            for x in detectors.evidence_rows(det, det.get("group", {}), t_from, t_to):
+            rows = detectors.evidence_rows(det, det.get("group", {}), t_from, t_to, limit=EVIDENCE_ROWS)
+            for x in rows:
                 total += x["hits"]
                 if known.classify_idx(f"{x['host']} | {x['ident']} | {x['msg']}")[0] == "keep":
                     kept.append(f"{x['host']} | {x['ident']} | {x['hits']}x | {cut(x['msg'], 200)}")
@@ -955,18 +1010,21 @@ def item_evidence(job, known, t_from, t_to):
         except (OSError, ValueError) as e:
             log(f"detektor-bizonyitek lekerdezese sikertelen: {e}", key="alert_evidence")
             return None
-        return {"kept": kept, "suppressed": suppressed, "total": total}
+        return {"kept": kept, "suppressed": suppressed, "total": total, "incomplete": len(rows) >= EVIDENCE_ROWS}
     targets = [lab for lab in job.get("alert_labels", []) if lab.get("alertname") == "JournaldCritical"
                and SAFE_LABEL.match(lab.get("host", "")) and SAFE_LABEL.match(lab.get("SYSLOG_IDENTIFIER", ""))]
     if not targets:
         return None
     kept, suppressed, total = [], 0, 0
     prio = None            # a legkisebb (legsulyosabb) PRIORITY a megtartott soroknal; 3 = err, <=2 = crit/alert/emerg
+    incomplete = False     # a lista csonka (limit), vagy egy elnyelt sor crit/alert/emerg: a "minden zaj" dontes nem biztos (audit M5)
     try:
         for lab in targets:
             q = (f'_time:[{iso(t_from)}, {iso(t_to)}] _HOSTNAME:"{lab["host"]}" SYSLOG_IDENTIFIER:"{lab["SYSLOG_IDENTIFIER"]}" '
-                 f"PRIORITY:in(0,1,2,3) | collapse_nums | stats by (_msg) count() as hits, min(PRIORITY) as prio | sort by (hits desc) | limit 8")
-            for x in vl_query(q):
+                 f"PRIORITY:in(0,1,2,3) | collapse_nums | stats by (_msg) count() as hits, min(PRIORITY) as prio | sort by (hits desc) | limit {EVIDENCE_ROWS}")
+            rows = vl_query(q)
+            incomplete = incomplete or len(rows) >= EVIDENCE_ROWS
+            for x in rows:
                 try:
                     n = int(x.get("hits", 0) or 0)
                 except ValueError:
@@ -982,10 +1040,11 @@ def item_evidence(job, known, t_from, t_to):
                     prio = p if prio is None else min(prio, p)
                 else:
                     suppressed += n
+                    incomplete = incomplete or p <= 2
     except (OSError, ValueError) as e:
         log(f"riasztas-bizonyitek lekerdezese sikertelen: {e}", key="alert_evidence")
         return None
-    return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio}
+    return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio, "incomplete": incomplete}
 
 
 def run_job(job, known, pool, dry_run=False):

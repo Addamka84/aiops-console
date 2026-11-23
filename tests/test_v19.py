@@ -63,7 +63,8 @@ def fake_openai(models=("big-model",), content=None, calls=None, reject_schema=F
 class OpenAITests(unittest.TestCase):
     def setUp(self):
         self.saved = dict(aiops.CFG)
-        aiops.CFG.update({"LLM_API": "openai", "MODEL": "big-model", "PROBE_TIMEOUT": 2, "GEN_TIMEOUT": 5, "LLM_API_KEY": ""})
+        aiops.CFG.update({"LLM_API": "openai", "MODEL": "big-model", "PROBE_TIMEOUT": 2, "GEN_TIMEOUT": 5, "LLM_API_KEY": "",
+                          "ALLOWED_LLM_HOSTS": ["127.0.0.1"]})   # a hamis szerver a loopbacken: a kulcs csak engedelyezett hosztra megy (alpha.30)
         aiops._OPENAI_NO_SCHEMA.clear()
 
     def tearDown(self):

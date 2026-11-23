@@ -26,6 +26,8 @@ MAX_RULES = 100
 FILE_NAME = "aiops-console.yml"
 _ID_RX = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
 _LABEL_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
+# Nagy szamossagu mezok: csoportositasuk percenkent szazszamra adna kulon riasztast (riasztas-aradat, vmalert-memoria; audit M3)
+GROUP_DENY = {"_msg", "_time", "_stream", "_stream_id", "message", "msg", "MESSAGE"}
 _TPL_RX = re.compile(r"\{\{(.*?)\}\}")
 _TPL_OK = re.compile(r"^\s*(\$value|\$labels\.[A-Za-z_][A-Za-z0-9_]*)\s*$")
 COMMON = {"id", "enabled", "kind", "interval_min", "for_min", "keep_firing_min", "severity", "notify", "summary", "note"}
@@ -72,7 +74,7 @@ def check_expr(e):
         return "single quotes and backticks are not allowed outside double-quoted text"
     if ";" in bare:
         return "expr must not contain ';' outside quotes"
-    if bare.count("(") != bare.count(")"):
+    if not detectors.parens_ok(bare):
         return "unbalanced parentheses in expr"
     if not re.search(r"\|\s*stats\b", bare):
         return "expr needs a stats pipe (vmalert fires for every result row)"
@@ -128,8 +130,11 @@ def validate(doc):
             m = check_summary(r["summary"])
             if m:
                 errs.append(f"{where}: {m}")
-        if not isinstance(r.get("note", ""), str) or len(r.get("note", "")) > 300:
-            errs.append(f"{where}: note must be at most 300 characters")
+        note = r.get("note", "")
+        if not isinstance(note, str) or len(note) > 300 or "\n" in note or "\r" in note:
+            errs.append(f"{where}: note must be a single line of at most 300 characters")
+        elif "{{" in note or "}}" in note:          # a note a 'description' annotacioba kerul, amit a vmalert sablonkent ertekel (audit M2)
+            errs.append(f"{where}: note may not contain {{{{ or }}}} (it is not a template)")
         if kind == "raw":
             m = check_expr(r.get("expr"))
             if m:
@@ -146,6 +151,8 @@ def validate(doc):
         if "group_by" in KIND_FIELDS[kind]:
             if not isinstance(gb, list) or len(gb) > 3 or any(not isinstance(x, str) or not _LABEL_RX.match(x) for x in gb):
                 errs.append(f"{where}: group_by must be a list of at most 3 field names (letters, digits, '_')")
+            elif any(x in GROUP_DENY for x in gb):
+                errs.append(f"{where}: group_by may not use the message or time fields ({', '.join(sorted(GROUP_DENY))}): one alert per message would flood")
             elif kind == "silence" and not gb:
                 errs.append(f"{where}: kind silence needs at least one group_by field (the sources it watches)")
         w, iv, hh = (r.get(k, DEFAULTS[k]) for k in ("window_min", "interval_min", "history_h"))

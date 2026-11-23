@@ -140,13 +140,31 @@ def _read(path):
         return None
 
 
+DRY_MAX_SERIES = 200        # ennel tobb eredmenysor (= kulon riasztas egy kiertekeleskor) riasztas-aradat: nem adjuk ki
+DRY_TIMEOUT_S = 20
+DRY_MAX_BYTES = 2_000_000
+
+
+def _dry_span_min(r):
+    """A szaraz futtatas idoablaka percben: amit a vmalert egy kiertekeleskor nez (a raw-nal a csoport intervalluma, mert a vmalert ennyit ad)."""
+    if r["kind"] == "silence":
+        return r["history_h"] * 60
+    if r["kind"] in ("count", "absent"):
+        return r["window_min"]
+    return max(1, r["interval_min"])
+
+
 def dry_run(doc):
-    """Minden engedelyezett szabaly kifejezese lefut a VictoriaLogson. -> hibauzenet vagy None."""
+    """Minden engedelyezett szabaly kifejezese lefut a VictoriaLogson, a vmalert-kiertekeles idoablakara korlatozva (start/end), sorkorlattal es
+    valaszmeret-korlattal (audit M3). Elutasitas: a VictoriaLogs hibat ad, tul sok eredmenysor jon, a valasz tul nagy, VAGY idotullepes
+    (korabban az idotullepes atment: egy percenkent futo, 20 mp-nel lassabb szabaly a vmalertet es a VictoriaLogs-ot is terhelne). -> hibauzenet vagy None."""
+    now = aiops.utcnow()
     for r in (rules.full(x) for x in doc.get("rules", [])):
         if not r["enabled"]:
             continue
+        q = f"{rules.expr(r)} | limit {DRY_MAX_SERIES + 1}"
         try:
-            aiops.vl_query(rules.expr(r), timeout=20)
+            rows = aiops.vl_query(q, timeout=DRY_TIMEOUT_S, start=now - aiops.dt.timedelta(minutes=_dry_span_min(r)), end=now, max_bytes=DRY_MAX_BYTES)
         except urllib.error.HTTPError as e:
             try:
                 body = e.read().decode("utf-8", "replace").strip()
@@ -154,9 +172,13 @@ def dry_run(doc):
                 body = ""
             return f"rule {r['id']}: VictoriaLogs rejected the expression (HTTP {e.code}) {body[:200]}"
         except TimeoutError:
-            aiops.log(f"rules-sync: a(z) {r['id']} szabaly szaraz futtatasa idotullepes (nem hiba: lassu kifejezes)", key=("dry", r["id"]))
-        except (OSError, ValueError) as e:
+            return f"rule {r['id']}: the dry run took over {DRY_TIMEOUT_S} s (too expensive to run every {r['interval_min']} min)"
+        except ValueError as e:
+            return f"rule {r['id']}: {e}"
+        except OSError as e:
             return f"VictoriaLogs not reachable ({type(e).__name__}): the rules were not checked and not applied"
+        if len(rows) > DRY_MAX_SERIES:
+            return f"rule {r['id']}: more than {DRY_MAX_SERIES} result rows in one evaluation (each row is a separate alert: alert flood)"
     return None
 
 

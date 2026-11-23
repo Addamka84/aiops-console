@@ -37,7 +37,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, aiops.vl_insert, aiops.collect, aiops.build_input, aiops.review_stats, aiops.ollama_chat)
         self.queries, self.inserted, self.extra = [], [], []
-        self.evidence_rows = [{"_msg": I915, "hits": "1"}]
+        self.evidence_rows = [{"_msg": I915, "hits": "1", "prio": "3"}]   # err szint: a crit (<=2) elnyelt sor nem hagyhato ki (alpha.30)
 
         def q(query, timeout=None):
             self.queries.append(query)

@@ -154,6 +154,12 @@ def validate(overrides):
     eff = effective(clean)
     if eff["BACKOFF_MIN"] > eff["BACKOFF_MAX"]:
         errs.append("BACKOFF_MIN must not exceed BACKOFF_MAX")
+    if aiops.CFG.get("ALLOWED_LLM_HOSTS"):      # engedelyezett-lista: a modell-vegpont csak ismert hosztra allithato (audit M7)
+        for k in ("OLLAMA_URLS", "SUPERVISOR_URL"):
+            urls = clean.get(k)
+            for u in (urls if isinstance(urls, list) else [urls] if urls else []):
+                if not aiops.llm_host_allowed(u):
+                    errs.append(f"{k}: host of {u} is not in ALLOWED_LLM_HOSTS (environment variable)")
     return clean, errs
 
 

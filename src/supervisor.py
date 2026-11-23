@@ -269,7 +269,8 @@ def make_model():
     if api == "ollama":
         return OllamaModel(aiops.CFG["SUPERVISOR_URL"], aiops.CFG["SUPERVISOR_MODEL"], aiops.CFG["SUPERVISOR_TIMEOUT_S"],
                            aiops.CFG["SUPERVISOR_NUM_CTX"], aiops.CFG["SUPERVISOR_MAX_OUT_TOKENS"], aiops.CFG["SUPERVISOR_REASONING"])
-    return OpenAIModel(aiops.CFG["SUPERVISOR_URL"], aiops.CFG["SUPERVISOR_MODEL"], aiops.CFG["SUPERVISOR_KEY"], aiops.CFG["SUPERVISOR_TIMEOUT_S"],
+    key = aiops.CFG["SUPERVISOR_KEY"] if aiops.llm_host_allowed(aiops.CFG["SUPERVISOR_URL"]) else ""   # a kulcs csak engedelyezett hosztra (audit M7)
+    return OpenAIModel(aiops.CFG["SUPERVISOR_URL"], aiops.CFG["SUPERVISOR_MODEL"], key, aiops.CFG["SUPERVISOR_TIMEOUT_S"],
                        aiops.CFG["SUPERVISOR_MAX_OUT_TOKENS"], aiops.CFG["SUPERVISOR_REASONING"])
 
 
@@ -475,7 +476,12 @@ def finding_detector_draft(f, existing=()):
 MIN_NOISE_REGEX = 18                # ennel rovidebb regex (pl. "GET /health") mas szolgaltatasok soraira is illeszkedne
 _DANGER_LEVELS = {"err", "error", "crit", "critical", "alert", "emerg", "fatal"}
 _DANGER_RX = re.compile(r"(?i)\b(error|critical|fatal|fail(?:ed|ure|ing)?|panic|exception|traceback|denied|corrupt\w*|out of memory|oom|segfault|smart|unreachable|refused)\b")
-_CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1234", "FAILED SMART self-check. BACK UP DATA NOW!", "CRITICAL unhandled exception", "")
+_CANARIES = ("ERROR: something failed", "kernel: Out of memory: Killed process 1234", "FAILED SMART self-check. BACK UP DATA NOW!", "CRITICAL unhandled exception", "",
+             # biztonsagi esemenyek (alpha.30, audit M4): sikeres es sikertelen belepes, jogosultsag-emeles, felhasznalo-letrehozas, lemez-I/O hiba
+             "sshd[123]: Accepted publickey for root from 10.0.0.1 port 22 ssh2", "sshd[123]: Failed password for invalid user admin from 10.0.0.1",
+             "sudo: alice : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/bin/bash", "pam_unix(sshd:session): session opened for user root",
+             "useradd[99]: new user: name=backdoor, UID=0", "kernel: blk_update_request: I/O error, dev sda, sector 1234",
+             "kernel: ata1: hard resetting link", "kernel: myapp[123]: segfault at 0 ip 0 sp 0 error 4")
 _NESTED_Q = re.compile(r"\([^()]*[+*][^()]*\)\s*[+*{]")
 _NESTED_ALT = re.compile(r"\([^()]*\|[^()]*\)\s*[+*{]")      # (a|aa)+ , (\w|\d)* : atfedo alternativak ismetlese (katasztrofalis visszalepes)
 
@@ -505,6 +511,13 @@ def check_noise_regex(rx, ref_templates, all_findings, must_keep=()):
         return f"regex length must be {MIN_NOISE_REGEX}..200 characters (a short phrase such as GET /health would silence other services too)"
     if not re.search(r"\s|\\s", rx):
         return "the regex has no message text (it would silence a whole source, including its future errors)"
+    import regex_guard
+    bad = regex_guard.check([rx])         # a ReDoS-vedelem MINDEN folyamaton beluli futtatas elott (audit H1)
+    if bad:
+        return bad
+    core = rx.replace(r"(?:<N>|\d+)", "").replace(r"(<N>|\d+)", "")     # a szam-helyorzo alternacioja megengedett (normalize_noise_regex)
+    if re.search(r"(?<!\\)\|", re.sub(r"\[(?:\\.|[^\]\\])*\]", "", core)):
+        return "a model-proposed noise regex may not contain alternation (|): one rule per pattern (an alternation can hide unrelated critical lines)"
     if _NESTED_Q.search(rx):
         return "nested quantifiers are not allowed"
     if _NESTED_ALT.search(rx):
