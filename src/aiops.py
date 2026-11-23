@@ -51,6 +51,7 @@ CFG = {
     "GEN_TIMEOUT": _env_int("GEN_TIMEOUT", 240),       # mp: egy generalas legfeljebb ennyi ideig tarthat
     "BACKOFF_MIN": _env_int("BACKOFF_MIN", 120),       # mp: lent levo vegpont elso ujraprobalasa
     "BACKOFF_MAX": _env_int("BACKOFF_MAX", 1800),      # mp: az ujraprobalas felso hatara
+    "ENDPOINT_CHECK_S": _env_int("ENDPOINT_CHECK_S", 60),  # mp: a hatterszal ennyi idonkent ellenorzi MINDEN LLM-vegpont elerhetoseget (modellhivas nelkul; 15-600)
     "DIGEST_UTC": os.environ.get("DIGEST_UTC", "06:30"),
     "DIGEST_HOURS": _env_int("DIGEST_HOURS", 24),
     "INCIDENT_POLL_S": _env_int("INCIDENT_POLL_S", 60),
@@ -114,7 +115,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.28"
+__version__ = "2.0.0-alpha.29"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -682,7 +683,8 @@ class EndpointPool:
 
     def __init__(self, urls, model):
         self.model = model
-        self.eps = [{"url": u, "down_until": 0.0, "fails": 0, "state": "unknown"} for u in urls]
+        self._lock = threading.Lock()   # az allapotot a munka-szal (pick/mark_down) es az ellenorzo szal (check_all) is irja
+        self.eps = [{"url": u, "down_until": 0.0, "fails": 0, "state": "unknown", "checked": "", "latency_ms": None, "why": ""} for u in urls]
 
     def _probe(self, ep):
         """Rovid timeoutu elerhetoseg- es modell-ellenorzes. -> (ok, ok_text)"""
@@ -705,10 +707,12 @@ class EndpointPool:
         return True, "ok"
 
     def mark_down(self, ep, reason):
-        ep["fails"] += 1
-        wait = min(CFG["BACKOFF_MAX"], CFG["BACKOFF_MIN"] * (2 ** (ep["fails"] - 1)))
-        ep["down_until"] = time.monotonic() + wait
-        ep["state"] = "down"
+        with self._lock:
+            ep["fails"] += 1
+            wait = min(CFG["BACKOFF_MAX"], CFG["BACKOFF_MIN"] * (2 ** (ep["fails"] - 1)))
+            ep["down_until"] = time.monotonic() + wait
+            ep["state"] = "down"
+            ep["why"] = str(reason)[:200]
         log(f"Ollama vegpont lent: {ep['url']} ({reason}); kovetkezo probalkozas {int(wait)} mp mulva", key=("ep", ep["url"]))
 
     def pick(self):
@@ -721,15 +725,38 @@ class EndpointPool:
             if ok:
                 if ep["state"] != "up":
                     log(f"Ollama vegpont elerheto: {ep['url']}", key=("ep", ep["url"]))
-                ep["fails"] = 0
-                ep["state"] = "up"
+                with self._lock:
+                    ep["fails"], ep["state"], ep["why"] = 0, "up", ""
                 return ep
             self.mark_down(ep, why)
         return None
 
+    def check_all(self):
+        """Hatterszal-ellenorzes: MINDEN vegpontot megprobal (csak az elerhetoseg es a modell megleteenek lekerdezese, MODELLHIVAS NELKUL), es frissiti
+        az allapotot, az ellenorzes idejet es a valaszidot. Egy elerheto vegpont azonnal visszakerul a hasznalatba (a visszalepes nullazodik); egy
+        elerhetetlen a kovetkezo ellenorzesig nem kerul a munkak ele (igy a munkak nem veszitenek el egy-egy probat rajta)."""
+        for ep in list(self.eps):
+            t0 = time.monotonic()
+            ok, why = self._probe(ep)
+            ms = int((time.monotonic() - t0) * 1000)
+            with self._lock:
+                ep["checked"] = iso(utcnow())
+                ep["latency_ms"] = ms if ok else None
+                ep["why"] = "" if ok else why
+                if ok:
+                    ep["state"], ep["fails"], ep["down_until"] = "up", 0, 0.0
+                else:
+                    if ep["state"] != "down":
+                        ep["fails"] = max(ep["fails"], 1)
+                    ep["state"] = "down"
+                    ep["down_until"] = max(ep["down_until"], time.monotonic() + max(15, CFG["ENDPOINT_CHECK_S"]))
+            log(f"Ollama vegpont elerheto: {ep['url']}" if ok else f"Ollama vegpont lent: {ep['url']} ({why})", key=("epcheck", ep["url"]))
+
     def status(self):
         now = time.monotonic()
-        return [{"url": e["url"], "state": e["state"], "fails": e["fails"], "retry_in_s": max(0, int(e["down_until"] - now))} for e in self.eps]
+        with self._lock:
+            return [{"url": e["url"], "state": e["state"], "fails": e["fails"], "retry_in_s": max(0, int(e["down_until"] - now)),
+                     "checked": e.get("checked", ""), "latency_ms": e.get("latency_ms"), "why": e.get("why", "")} for e in self.eps]
 
 
 def ollama_chat(ep_url, system, user):
@@ -1482,6 +1509,32 @@ def notify_test():
                               "issue_count": 0, "all_clear": True, "model": CFG["MODEL"]})
 
 
+POOL = None   # a service_loop aktualis EndpointPool-ja; az ellenorzo szal ezt vizsgalja
+
+
+_CHECK = {"pool": None, "last": 0.0}
+
+
+def endpoint_check_tick():
+    """Egy lepes: ha a pool uj (vegpontlista / modell valtozas) vagy letelt az ENDPOINT_CHECK_S (15-600 mp), minden vegpont ellenorzese."""
+    pool = POOL
+    due = time.monotonic() - _CHECK["last"] >= max(15, min(600, CFG["ENDPOINT_CHECK_S"]))
+    if pool is not None and (pool is not _CHECK["pool"] or due):
+        pool.check_all()
+        STATUS["endpoints"] = pool.status()
+        _CHECK["pool"], _CHECK["last"] = pool, time.monotonic()
+
+
+def endpoint_check_loop():
+    """Sajat szal: minden LLM-vegpont elerhetosegi proba az ENDPOINT_CHECK_S szerint, modellhivas nelkul (az idokoz valtozasat <= 5 mp keses mellett veszi fel)."""
+    while True:
+        try:
+            endpoint_check_tick()
+        except Exception as e:  # noqa: BLE001 - a szal nem halhat meg
+            log(f"vegpont-ellenorzes hiba: {type(e).__name__}: {e}", key="ep_check")
+        time.sleep(5)
+
+
 def send_heartbeat(pool, state):
     """Eletjel a tarba: a vmalert 'AIOpsDown' / 'AIOpsLLMUnavailable' szabalya ezt figyeli. SOHA nem dob kivetelt.
 
@@ -1518,9 +1571,10 @@ def handle_commands(state):
 def service_loop(get_known, store=None):
     """get_known: hivhato, ami az aktualis Known-t adja (a konfig valtozasat a konzol utan azonnal felveszi).
     store: a konfig-tar; ha van, az ujdonsag-eszlelo (novelty.py) is fut, es a napi osszefoglalo bemenete kap egy szakaszt."""
-    global DIGEST_EXTRAS
+    global DIGEST_EXTRAS, POOL
     pool, pool_key = None, None
     state = load_state()
+    threading.Thread(target=endpoint_check_loop, daemon=True, name="endpoint-check").start()
     if store is not None:
         import novelty  # kesve: a novelty az aiops-ot importalja
         DIGEST_EXTRAS = lambda t_from, t_to: novelty.digest_lines(store, t_from, t_to)  # noqa: E731
@@ -1540,6 +1594,7 @@ def service_loop(get_known, store=None):
             key = (tuple(CFG["OLLAMA_URLS"]), CFG["MODEL"])
             if key != pool_key:
                 pool, pool_key = EndpointPool(CFG["OLLAMA_URLS"], CFG["MODEL"]), key
+                POOL = pool
             now = utcnow()
             if CFG["HEARTBEAT_S"] and (last_hb is None or time.monotonic() - last_hb >= CFG["HEARTBEAT_S"]):
                 last_hb = time.monotonic()

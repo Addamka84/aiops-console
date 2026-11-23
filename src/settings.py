@@ -20,6 +20,7 @@ SPEC = {
     "GEN_TIMEOUT": {"type": "int", "min": 10, "max": 1800, "desc": "Maximum duration of one generation (s)."},
     "BACKOFF_MIN": {"type": "int", "min": 10, "max": 3600, "desc": "First retry delay for a down endpoint (s)."},
     "BACKOFF_MAX": {"type": "int", "min": 60, "max": 86400, "desc": "Upper bound of the retry delay (s)."},
+    "ENDPOINT_CHECK_S": {"type": "int", "min": 15, "max": 600, "desc": "How often the background job checks every LLM endpoint (s). Only reachability and the presence of the model are queried, the model is never called; the Status page shows the result and the time of the last check."},
     "DIGEST_UTC": {"type": "hhmm", "desc": "Daily digest time (UTC, HH:MM)."},
     "DIGEST_HOURS": {"type": "int", "min": 1, "max": 168, "desc": "Window covered by the daily digest (hours)."},
     "INCIDENT_POLL_S": {"type": "int", "min": 10, "max": 3600, "desc": "How often to look for new firing alerts (s)."},
