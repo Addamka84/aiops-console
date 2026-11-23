@@ -22,6 +22,7 @@ import evidence
 import ingest
 import noisemodel
 import novelty
+import rules
 import runtime
 import settings
 import supervisor
@@ -72,6 +73,10 @@ class TopoTestIn(BaseModel):
 class IngestTestIn(BaseModel):
     source: str = Field("", max_length=60)
     value: str = Field("", max_length=100)
+    content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett dokumentum)
+
+
+class RulesPreviewIn(BaseModel):
     content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett dokumentum)
 
 
@@ -233,7 +238,8 @@ def create_app(rt, tokens=None):
     def status(_: Actor = Depends(read)):
         s = dict(aiops.STATUS)
         s["config"] = {"known_rev": store.revision_id("known"), "settings_rev": store.revision_id("settings"),
-                       "topology_rev": store.revision_id("topology"), "detectors_rev": store.revision_id("detectors")}
+                       "topology_rev": store.revision_id("topology"), "detectors_rev": store.revision_id("detectors"),
+                       "rules_rev": store.revision_id("rules")}
         s["settings"] = settings.effective((store.current("settings") or {"content": {}})["content"])
         s["notify_configured"] = bool(aiops.CFG["HA_WEBHOOK_URL"])
         s["next_digest_utc"] = next_digest()
@@ -376,6 +382,20 @@ def create_app(rt, tokens=None):
                 raise HTTPException(502, vl_down(e))
             cov_cache[hours] = (time.monotonic(), seen)
         return dict(topology.coverage(topo, seen), hours=hours, assets=len(topo.assets), seen=len(seen))
+
+    # ------------------------------------------------------------ vmalert-szabalyok: elonezet (fajlt nem ir, a vmalertet nem hivja)
+    @app.get("/api/v1/rules/preview")
+    def rules_preview_saved(_: Actor = Depends(read)):
+        """A mentett 'rules' dokumentumbol renderelt vmalert szabaly-fajl (a kovetkezo lepesben ez kerul a kozos mappaba)."""
+        cur = store.current("rules")
+        return dict(rules.preview((cur or {"content": {}})["content"], cur["id"] if cur else None), rev=cur["id"] if cur else 0)
+
+    @app.post("/api/v1/rules/preview")
+    def rules_preview_draft(body: RulesPreviewIn, _: Actor = Depends(read)):
+        """Egy meg nem mentett szerkesztes ellenorzese es renderelese (hibak 200-as valaszban, mint a szerkesztoben szokas)."""
+        if body.content is None:
+            return rules_preview_saved(_)
+        return rules.preview(body.content)
 
     # ------------------------------------------------------------ detektorok: visszateszt es allapot
     @app.post("/api/v1/test/detector")

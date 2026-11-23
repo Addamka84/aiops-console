@@ -14,11 +14,12 @@ import uuid
 import aiops
 import detectors
 import ingest
+import rules
 import settings
 import topology
 
 DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults", "known.default.json")
-KEYS = ("known", "settings", "topology", "detectors", "ingest")
+KEYS = ("known", "settings", "topology", "detectors", "ingest", "rules")
 
 
 class DocError(Exception):
@@ -51,6 +52,11 @@ def validate_doc(key, content):
         return content
     if key == "ingest":
         errs = ingest.validate(content)
+        if errs:
+            raise DocError(errs)
+        return content
+    if key == "rules":
+        errs = rules.validate(content)
         if errs:
             raise DocError(errs)
         return content

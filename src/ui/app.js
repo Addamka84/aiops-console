@@ -80,7 +80,7 @@ const isAdmin = () => S.role === 'admin';
 // ---------------------------------------------------------------- shell
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
 const TABS = [['status', 'Status', 'Monitor'], ['history', 'History', 'Monitor'],
-  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['settings', 'Settings', 'Configure'],
+  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['rules', 'Alert rules', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['settings', 'Settings', 'Configure'],
   ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
@@ -136,7 +136,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -389,7 +389,7 @@ async function pageStatus() {
           h('dt', {}, 'Next digest'), h('dd', {}, fmtTime(s.next_digest_utc)),
           h('dt', {}, 'Notifications'), h('dd', {}, s.notify_configured ? 'configured' : 'not configured (HA_WEBHOOK_URL)'),
           h('dt', {}, 'Last notification'), h('dd', {}, s.last_notify ? (s.last_notify.ok ? 'ok' : 'FAILED') + ' · ' + s.last_notify.kind + ' · ' + fmtTime(s.last_notify.at) : '-'),
-          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', detectors #' + (s.config.detectors_rev || 0) + ', settings #' + s.config.settings_rev))),
+          h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', detectors #' + (s.config.detectors_rev || 0) + ', rules #' + (s.config.rules_rev || 0) + ', settings #' + s.config.settings_rev))),
       h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Actions'),
         isAdmin() ? h('div', { class: 'row' },
           h('span', { class: 'muted small' }, 'Digest over the last'), hoursInp, h('span', { class: 'muted small' }, 'h'),
@@ -1135,7 +1135,7 @@ async function pageHistory() {
   renderShell([
     h('h2', {}, 'History'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
-      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'ingest', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'rules', 'ingest', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
     h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
     audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
       h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),
@@ -1220,6 +1220,82 @@ function drawIng() {
       h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Uses the document above (unsaved edits included); nothing is changed.')),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Effective mapping (saved configuration)'),
       h('table', {}, h('thead', {}, h('tr', {}, ['Tool', 'Raw value → level', 'Fallback', 'Field paths'].map((x) => h('th', {}, x)))), h('tbody', {}, effRows))),
+  ]);
+}
+
+// ---------------------------------------------------------------- alert rules (vmalert rules managed here; preview only: nothing is written to vmalert yet)
+S.rul = null;
+const RULE_TEMPLATE = { rules: [{ id: 'ContainerLogFlood', kind: 'count', query: 'pipeline:docker', group_by: ['host', 'appname'], threshold: 12001, window_min: 1, severity: 'medium' }] };
+async function loadRul() {
+  const r = await api('GET', '/api/v1/config/rules');
+  const keep = S.rul || {};
+  S.rul = { rev: r.id, base: r.content, text: JSON.stringify(r.id ? r.content : RULE_TEMPLATE, null, 2), comment: '', error: '', diff: null, pre: keep.pre || null };
+}
+function rulDraft() {
+  try {
+    const d = JSON.parse(S.rul.text || '{}');
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('the document must be a JSON object');
+    S.rul.error = ''; return d;
+  } catch (e) { S.rul.error = 'Not valid JSON: ' + e.message; drawRul(); return null; }
+}
+async function rulPreview() {
+  const d = rulDraft(); if (!d) return;
+  try { S.rul.pre = await api('POST', '/api/v1/rules/preview', { content: d }); S.rul.error = ''; } catch (e) { S.rul.pre = null; S.rul.error = e.message; }
+  drawRul();
+}
+async function rulDiff() {
+  const d = rulDraft(); if (!d) return;
+  try { S.rul.diff = (await api('POST', '/api/v1/config/rules/diff', { content: d })).diff; S.rul.error = ''; } catch (e) { S.rul.error = e.message; }
+  drawRul();
+}
+async function rulSubmit(kind) {
+  const d = rulDraft(); if (!d) return;
+  const comment = S.rul.comment.trim();
+  if (!comment) { toast('Add a short comment (what and why).', true); return; }
+  try {
+    if (kind === 'save') {
+      const r = await api('PUT', '/api/v1/config/rules', { content: d, comment });
+      toast(r.changed ? 'Saved as revision ' + r.rev + '. (Not applied to vmalert yet.)' : 'No changes.');
+      S.rul = null; await loadRul();
+    } else {
+      const r = await api('POST', '/api/v1/proposals', { key: 'rules', content: d, comment });
+      toast('Proposal #' + r.id + ' created.'); S.rul.comment = ''; refreshPendingCount();
+    }
+  } catch (e) { S.rul.error = e.message; toast('Rejected: see the message above', true); }
+  drawRul();
+}
+const pageRules = async () => { if (!S.rul) await loadRul(); drawRul(); };
+function drawRul() {
+  const g = S.rul;
+  const dirty = (() => { try { return JSON.stringify(JSON.parse(g.text || '{}')) !== JSON.stringify(g.base); } catch (e) { return true; } })();
+  const saved = (g.base && g.base.rules) || [];
+  const rows = saved.map((x) => h('tr', {},
+    h('td', { class: 'mono small nowrap' }, x.id), h('td', { class: 'small' }, x.kind), h('td', { class: 'small nowrap' }, (x.interval_min || 1) + ' min'),
+    h('td', {}, sevBadge(x.severity || 'medium')), h('td', { class: 'small' }, x.notify || 'triage'),
+    h('td', { class: 'small' }, x.enabled === false ? h('span', { class: 'muted' }, 'off') : 'on')));
+  const pre = g.pre;
+  renderShell([
+    h('h2', {}, 'Alert rules'),
+    h('p', { class: 'muted' }, 'Detection runs in vmalert (VictoriaLogs rules) and Alertmanager; the console manages the rules here (proposal, approval, revision, audit) and turns them into the vmalert rule file. This preview version only validates and renders: saving a revision does not change vmalert yet, and the rules defined in the logstack compose file keep running as they are.'),
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Rules (JSON document)'),
+      h('p', { class: 'muted small' }, 'Kinds: count (threshold of matching lines in a window, optional group_by), silence (a source that was seen in history_h hours but not for window_min minutes), absent (no match at all in the window), raw (full LogsQL with a stats pipe, expert). notify: triage (AI analysis) | direct (straight to Home Assistant) | none (log only). The summary may only use {{ $value }} and {{ $labels.<field> }}.'),
+      h('textarea', { class: 'mono', rows: 16, style: 'width:100%', value: g.text, spellcheck: false, oninput: (e) => { g.text = e.target.value; g.diff = null; g.pre = null; } }),
+      g.error ? h('div', { class: 'err' }, g.error) : null,
+      g.diff !== null ? diffEl(g.diff) : null,
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('input', { class: 'grow', placeholder: 'Comment: what and why', value: g.comment, oninput: (e) => { g.comment = e.target.value; } }),
+        h('button', { class: 'btn', onclick: rulPreview }, 'Validate & render'),
+        h('button', { class: 'btn', onclick: rulDiff }, 'Preview diff'),
+        h('button', { class: 'btn', onclick: () => rulSubmit('propose') }, 'Propose'),
+        isAdmin() ? h('button', { class: 'btn primary', onclick: () => rulSubmit('save') }, 'Save') : null),
+      h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Revision #' + g.rev + (dirty ? ' · unsaved changes' : '') + (isAdmin() ? '' : ' · read-only token: use Propose, an admin approves.'))),
+    pre ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'vmalert rule file (preview)'),
+      pre.errors && pre.errors.length ? h('div', { class: 'err' }, pre.errors.join('\n'))
+        : [h('p', { class: 'muted small' }, pre.rules + ' enabled rule(s), ' + pre.disabled + ' disabled. This text would be written to the shared rules folder.'),
+          h('pre', { class: 'diff' }, Object.values(pre.files)[0])]) : null,
+    h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Saved rules (' + saved.length + ')'),
+      saved.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Rule', 'Kind', 'Evaluated', 'Severity', 'Notify', 'State'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))
+        : h('p', { class: 'muted' }, 'No saved rules yet. The editor above starts from an example (the Docker log flood rule).')),
   ]);
 }
 
