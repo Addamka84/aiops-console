@@ -1,7 +1,7 @@
 """Szerkesztheto beallitasok: specifikacio, ellenorzes, ervenyesites.
 
 A kornyezeti valtozok (aiops.ENV_CFG) az alapertekek; a konzolbol mentett felulirasok ezekre rakodnak ra.
-Nem szerkesztheto az API-n at: VL_URL (infrastruktura), HA_WEBHOOK_URL (titok; csak kornyezeti valtozo),
+Nem szerkesztheto az API-n at: VL_URL, VMALERT_URL, RULES_DIR (infrastruktura), HA_WEBHOOK_URL (titok; csak kornyezeti valtozo),
 STATE_FILE, KNOWN_FILE, STATUS_PORT, LOOP_S, VL_TIMEOUT.
 """
 import re
@@ -38,6 +38,7 @@ SPEC = {
     "NOVELTY_SPIKE_FACTOR": {"type": "int", "min": 2, "max": 1000, "desc": "Report a rate spike when a pattern is this many times more frequent than its own average."},
     "DETECTOR_MODE": {"type": "choice", "choices": ["on", "off"], "desc": "UI-editable detectors (Detectors page): on | off."},
     "DETECTOR_INTERVAL_S": {"type": "int", "min": 30, "max": 3600, "desc": "How often all enabled detectors are evaluated (s)."},
+    "RULES_SYNC": {"type": "choice", "choices": ["on", "off"], "desc": "Alert rules (Alert rules page): on = every approved revision is written to the shared rules folder and vmalert is reloaded (with verification and automatic restore of the previous file); off = revisions are only saved. Needs the environment variables VMALERT_URL and RULES_DIR."},
     "LLM_API": {"type": "choice", "choices": ["ollama", "openai"], "desc": "Model API of the endpoints: ollama | openai (OpenAI-compatible: vLLM, NIM, llama.cpp server). The API key is the environment variable LLM_API_KEY only."},
     "FLAP_COUNT": {"type": "int", "min": 0, "max": 100, "desc": "An alert that fired this many times within FLAP_WINDOW_H is flapping: it gets a longer cooldown (never for critical). 0 = off."},
     "FLAP_WINDOW_H": {"type": "int", "min": 1, "max": 48, "desc": "Window for counting repeated firings of one alert (hours)."},

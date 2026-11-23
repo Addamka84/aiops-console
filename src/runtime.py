@@ -15,6 +15,7 @@ import aiops
 import detectors
 import ingest
 import rules
+import rulesync
 import settings
 import topology
 
@@ -169,6 +170,7 @@ class Runtime:
         self._topo_rev = -1
         self._det_rev = -1
         self._ing_rev = -1
+        self._rules_rev = -1
         self._raw = {}  # hours -> (monotonic, raw)  (a regex-teszt gyorsitotara)
 
     # ---- inditas
@@ -198,7 +200,8 @@ class Runtime:
         """Idempotens: csak akkor dolgozik, ha a verzio valtozott."""
         with self._lock:
             sid = self.store.revision_id("settings")
-            if sid != self._settings_rev:
+            settings_changed = sid != self._settings_rev
+            if settings_changed:
                 cur = self.store.current("settings")
                 settings.apply(cur["content"] if cur else {})
                 self._settings_rev = sid
@@ -212,6 +215,10 @@ class Runtime:
                 cur = self.store.current("detectors")
                 aiops.DETECTORS = [detectors.full(x) for x in (cur["content"].get("detectors", []) if cur else [])]
                 self._det_rev = did
+            rid = self.store.revision_id("rules")
+            if rid != self._rules_rev or settings_changed:
+                self._rules_rev = rid
+                rulesync.kick(self.store)      # kikapcsolt kiadasnal csak az allapotot frissiti ('off'); hatterszalban fut
             iid = self.store.revision_id("ingest")
             if iid != self._ing_rev:
                 cur = self.store.current("ingest")

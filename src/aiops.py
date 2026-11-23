@@ -107,8 +107,14 @@ CFG = {
     "SUPERVISOR_MAX_PROPOSALS_PER_RUN": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_RUN", 3),    # propose modban: egy futas legfeljebb ennyi javaslatot ad be
     "SUPERVISOR_MAX_PROPOSALS_PER_DAY": _env_int("SUPERVISOR_MAX_PROPOSALS_PER_DAY", 10),   # ... egy UTC napon ennyit
     "SUPERVISOR_MAX_ITEMS": _env_int("SUPERVISOR_MAX_ITEMS", 60),                # egy feladat bemenetenek elemszama (leletek; az incidensek ennek negyede)
+    # vmalert-szabalyok kiadasa (rulesync.py): a VMALERT_URL es a RULES_DIR kornyezeti valtozo (infrastruktura, nem szerkesztheto az API-n at);
+    # a RULES_SYNC kapcsolo alapbol KI: ekkor a mentett szabaly-revizio nem kerul a vmalerthez.
+    "VMALERT_URL": os.environ.get("VMALERT_URL", "").strip().rstrip("/"),
+    "RULES_DIR": os.environ.get("RULES_DIR", "").strip(),
+    "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
+    "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.27"
+__version__ = "2.0.0-alpha.28"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -846,6 +852,17 @@ def alert_labels(alerts_json, alertname="", limit=4):
     return out
 
 
+def alerts_log_only(alerts_json):
+    """True, ha az Alertmanager-csoport MINDEN riasztasa 'notify: none' cimkes (vmalert-szabaly): csak naplo, nincs incidens-triazs.
+    Ures / ervenytelen / cimke nelkuli csoport: False (a biztonsagos oldal: a riasztas feldolgozodik)."""
+    try:
+        arr = json.loads(alerts_json) if alerts_json else []
+    except (TypeError, ValueError):
+        return False
+    labs = [a.get("labels") for a in arr if isinstance(a, dict) and isinstance(a.get("labels"), dict)] if isinstance(arr, list) else []
+    return bool(labs) and len(labs) == len(arr) and all(str(lab.get("notify", "")).strip().lower() == "none" for lab in labs)
+
+
 def note_firing(state, key):
     """Egy riasztas tuzelesenek rogzitese (FLAP_WINDOW_H oraig orizve). -> a tuzelesek szama az ablakban (ezzel egyutt)."""
     hist = state.setdefault("alert_history", {})
@@ -1320,6 +1337,10 @@ def poll_incidents(state, now):
             last = t
         state["last_alert_ts"] = iso_us(last)
         key = f"{r.get('alertname', '')}|{r.get('alert_root', '')}"
+        if alerts_log_only(r.get("alerts", "")):             # 'notify: none' szabaly: a riasztas mar a tarban van (appname:alert), triazs nincs
+            STATUS["log_only_alerts"] = STATUS.get("log_only_alerts", 0) + 1
+            log(f"riasztas csak naplozva (notify: none): {key}", key=("log_only", key))
+            continue
         firings = note_firing(state, key)                     # minden tuzeles szamit (a 30 perces szuneteltetes alatt is): ebbol latszik a flapping
         last_seen = state["recent_alert_keys"].get(key, 0)   # (nem 'last': az az utolso esemeny ideje, kulon valtozo kell)
         if time.time() - last_seen < 1800:

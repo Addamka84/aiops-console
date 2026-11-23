@@ -23,6 +23,7 @@ import ingest
 import noisemodel
 import novelty
 import rules
+import rulesync
 import runtime
 import settings
 import supervisor
@@ -242,6 +243,7 @@ def create_app(rt, tokens=None):
                        "rules_rev": store.revision_id("rules")}
         s["settings"] = settings.effective((store.current("settings") or {"content": {}})["content"])
         s["notify_configured"] = bool(aiops.CFG["HA_WEBHOOK_URL"])
+        s["rules_sync"] = rulesync.status()
         s["next_digest_utc"] = next_digest()
         return s
 
@@ -396,6 +398,28 @@ def create_app(rt, tokens=None):
         if body.content is None:
             return rules_preview_saved(_)
         return rules.preview(body.content)
+
+    @app.get("/api/v1/rules/sync")
+    def rules_sync_state(_: Actor = Depends(read)):
+        """A kiadas allapota (utolso kiserlet, a kiadott revizio) + a vmalert elo nezete a sajat (aiops-console-*) csoportokrol."""
+        out = rulesync.status()
+        out["saved_rev"] = store.revision_id("rules")
+        out["vmalert"] = None
+        if rulesync.configured():
+            try:
+                out["vmalert"] = [{"group": g, "rule": r, **v} for g, rs in rulesync.vm_groups().items() for r, v in rs.items()]
+            except (OSError, ValueError):
+                out["vmalert_error"] = "vmalert unavailable"
+        return out
+
+    @app.post("/api/v1/rules/sync")
+    def rules_sync_run(who: Actor = Depends(admin)):
+        """A mentett revizio ujrakiadasa (fajl ujrairasa + reload + ellenorzes), pl. a RULES_SYNC bekapcsolasa utan vagy hiba javitasa utan."""
+        if not rulesync.enabled():
+            raise HTTPException(409, "rule sync is off or not configured (RULES_SYNC, VMALERT_URL, RULES_DIR)")
+        store.audit(who.name, "rules-sync-run", "re-apply requested")
+        rulesync.kick(store, force=True)
+        return {"requested": True}
 
     # ------------------------------------------------------------ detektorok: visszateszt es allapot
     @app.post("/api/v1/test/detector")

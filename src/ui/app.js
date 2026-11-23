@@ -1223,13 +1223,21 @@ function drawIng() {
   ]);
 }
 
-// ---------------------------------------------------------------- alert rules (vmalert rules managed here; preview only: nothing is written to vmalert yet)
+// ---------------------------------------------------------------- alert rules (vmalert rules managed here; released to vmalert when RULES_SYNC is on)
 S.rul = null;
 const RULE_TEMPLATE = { rules: [{ id: 'ContainerLogFlood', kind: 'count', query: 'pipeline:docker', group_by: ['host', 'appname'], threshold: 12001, window_min: 1, severity: 'medium' }] };
 async function loadRul() {
   const r = await api('GET', '/api/v1/config/rules');
   const keep = S.rul || {};
-  S.rul = { rev: r.id, base: r.content, text: JSON.stringify(r.id ? r.content : RULE_TEMPLATE, null, 2), comment: '', error: '', diff: null, pre: keep.pre || null };
+  S.rul = { rev: r.id, base: r.content, text: JSON.stringify(r.id ? r.content : RULE_TEMPLATE, null, 2), comment: '', error: '', diff: null, pre: keep.pre || null, sync: null };
+  await loadRulSync();
+}
+async function loadRulSync() {
+  try { S.rul.sync = await api('GET', '/api/v1/rules/sync'); } catch (e) { S.rul.sync = null; }
+}
+async function rulResync() {
+  try { await api('POST', '/api/v1/rules/sync'); toast('Re-apply requested.'); } catch (e) { toast(e.message, true); return; }
+  setTimeout(async () => { await loadRulSync(); if (S.tab === 'rules') drawRul(); }, 4000);
 }
 function rulDraft() {
   try {
@@ -1255,7 +1263,7 @@ async function rulSubmit(kind) {
   try {
     if (kind === 'save') {
       const r = await api('PUT', '/api/v1/config/rules', { content: d, comment });
-      toast(r.changed ? 'Saved as revision ' + r.rev + '. (Not applied to vmalert yet.)' : 'No changes.');
+      toast(r.changed ? 'Saved as revision ' + r.rev + '. Release to vmalert: see the panel below (a few seconds).' : 'No changes.');
       S.rul = null; await loadRul();
     } else {
       const r = await api('POST', '/api/v1/proposals', { key: 'rules', content: d, comment });
@@ -1264,7 +1272,23 @@ async function rulSubmit(kind) {
   } catch (e) { S.rul.error = e.message; toast('Rejected: see the message above', true); }
   drawRul();
 }
-const pageRules = async () => { if (!S.rul) await loadRul(); drawRul(); };
+const pageRules = async () => { if (!S.rul) await loadRul(); else await loadRulSync(); drawRul(); };
+function rulSyncPanel(g) {
+  const y = g.sync;
+  if (!y) return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Release to vmalert'), h('p', { class: 'muted' }, 'Status unavailable.'));
+  const live = (y.vmalert || []).map((x) => h('tr', {}, h('td', { class: 'mono small' }, x.group), h('td', { class: 'mono small' }, x.rule),
+    h('td', { class: 'small' }, x.state), h('td', { class: 'small' }, x.health === 'err' ? h('span', { class: 'err' }, x.error || 'error') : x.health || '-')));
+  const behind = y.sync === 'on' && y.saved_rev !== y.applied_rev;
+  return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Release to vmalert'),
+    h('div', { class: 'row' },
+      stateBadge(y.state === 'ok' ? 'up' : y.state === 'error' ? 'down' : 'unknown'), h('strong', {}, y.sync === 'on' ? 'sync on' : 'sync off'),
+      h('span', { class: 'muted small grow' }, y.configured ? '' : 'VMALERT_URL / RULES_DIR are not set on the service.'),
+      isAdmin() && y.sync === 'on' ? h('button', { class: 'btn', onclick: rulResync }, 'Re-apply') : null),
+    h('p', { class: 'small' }, y.message || 'No release attempt yet.', y.ts ? h('span', { class: 'muted' }, ' (' + fmtTime(y.ts) + ')') : null),
+    h('div', { class: 'muted small' }, 'Saved revision #' + y.saved_rev + ' · released revision #' + (y.applied_rev || 0) + (behind ? ' · behind' : '')),
+    live.length ? h('table', { style: 'margin-top:8px' }, h('thead', {}, h('tr', {}, ['Group', 'Rule', 'State', 'Health'].map((x) => h('th', {}, x)))), h('tbody', {}, live)) : null,
+    y.vmalert_error ? h('div', { class: 'err small' }, 'vmalert: ' + y.vmalert_error) : null);
+}
 function drawRul() {
   const g = S.rul;
   const dirty = (() => { try { return JSON.stringify(JSON.parse(g.text || '{}')) !== JSON.stringify(g.base); } catch (e) { return true; } })();
@@ -1276,7 +1300,7 @@ function drawRul() {
   const pre = g.pre;
   renderShell([
     h('h2', {}, 'Alert rules'),
-    h('p', { class: 'muted' }, 'Detection runs in vmalert (VictoriaLogs rules) and Alertmanager; the console manages the rules here (proposal, approval, revision, audit) and turns them into the vmalert rule file. This preview version only validates and renders: saving a revision does not change vmalert yet, and the rules defined in the logstack compose file keep running as they are.'),
+    h('p', { class: 'muted' }, 'Detection runs in vmalert (VictoriaLogs rules) and Alertmanager; the console manages the rules here (proposal, approval, revision, audit) and turns them into the vmalert rule file. A saved revision reaches vmalert only when rule sync is on (Settings: RULES_SYNC, and the VMALERT_URL / RULES_DIR environment variables); the rules defined in the logstack compose file keep running as they are.'),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Rules (JSON document)'),
       h('p', { class: 'muted small' }, 'Kinds: count (threshold of matching lines in a window, optional group_by), silence (a source that was seen in history_h hours but not for window_min minutes), absent (no match at all in the window), raw (full LogsQL with a stats pipe, expert). notify: triage (AI analysis) | direct (straight to Home Assistant) | none (log only). The summary may only use {{ $value }} and {{ $labels.<field> }}.'),
       h('textarea', { class: 'mono', rows: 16, style: 'width:100%', value: g.text, spellcheck: false, oninput: (e) => { g.text = e.target.value; g.diff = null; g.pre = null; } }),
@@ -1293,6 +1317,7 @@ function drawRul() {
       pre.errors && pre.errors.length ? h('div', { class: 'err' }, pre.errors.join('\n'))
         : [h('p', { class: 'muted small' }, pre.rules + ' enabled rule(s), ' + pre.disabled + ' disabled. This text would be written to the shared rules folder.'),
           h('pre', { class: 'diff' }, Object.values(pre.files)[0])]) : null,
+    rulSyncPanel(g),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Saved rules (' + saved.length + ')'),
       saved.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Rule', 'Kind', 'Evaluated', 'Severity', 'Notify', 'State'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))
         : h('p', { class: 'muted' }, 'No saved rules yet. The editor above starts from an example (the Docker log flood rule).')),

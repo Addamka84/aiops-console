@@ -189,6 +189,19 @@ def default_summary(r):
     return r["id"]
 
 
+GROUP_PREFIX = "aiops-console-"
+
+
+def group_name(interval_min):
+    return f"{GROUP_PREFIX}{interval_min}m"
+
+
+def live_groups(doc):
+    """{csoportnev: [alertname, ...]} az ENGEDELYEZETT szabalyokra: ennek kell a vmalertben megjelennie a kiadas utan."""
+    live = [full(r) for r in (doc or {}).get("rules", []) if full(r)["enabled"]]
+    return {group_name(iv): [r["id"] for r in live if r["interval_min"] == iv] for iv in sorted({r["interval_min"] for r in live})}
+
+
 def _q(s):
     """YAML dupla idezojeles szoveg: a JSON-szoveg ervenyes YAML (a sablonok es a kifejezesek biztonsagosan kerulnek bele)."""
     return json.dumps(s, ensure_ascii=False)
@@ -206,7 +219,7 @@ def render(doc, rev=None):
     if not live:
         lines = lines[:-1] + ["groups: []"]
     for iv in sorted({r["interval_min"] for r in live}):
-        lines += [f"  - name: {_q(f'aiops-console-{iv}m')}", "    type: vlogs", f"    interval: {iv}m", "    rules:"]
+        lines += [f"  - name: {_q(group_name(iv))}", "    type: vlogs", f"    interval: {iv}m", "    rules:"]
         for r in (x for x in live if x["interval_min"] == iv):
             lines += [f"      - alert: {r['id']}", f"        expr: {_q(expr(r))}"]
             if r["for_min"]:
