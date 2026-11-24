@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.30"
+__version__ = "2.0.0-alpha.31"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -138,6 +138,7 @@ Severity: critical = data loss/outage in progress; high = a service is down or d
 The "Docker containers" section lists, per container, how many error-like lines occurred and the top message patterns: many different lines from one container usually mean ONE problem (e.g. a crashing process on several cameras), so report it as one issue. Order issues by impact. A container with many error-like lines usually has a real, ongoing problem: report it unless the lines are clearly harmless.
 Report every host reboot shown in the "Kernel boots" section as one info-level issue (status resolved). Do not invent reboots when that section is empty.
 Set status: new / ongoing / resolved (resolved if the logs show recovery, e.g. 'OK' after 'not responding', or Up after Down).
+Timing in parentheses ("single burst", "over 9h", "last 3h before end") tells when a pattern occurred: a problem whose lines stopped hours before the end of the window is NOT ongoing (use resolved, severity low unless it caused an outage); a single short burst is low. A few lines spread over many hours (e.g. a handful of reconnects) are transient: low. Only lines still occurring near the end ("last <15m before end") can be ongoing.
 A pre-filter has already removed known-harmless noise from the input. If the input has a "Known issues present" section, those problems are already acknowledged: NEVER report them (not even as info).
 If nothing else looks wrong, return an empty issues list and all_clear=true."""
 
@@ -529,21 +530,29 @@ def strip_ts(msg):
     return TS_PREFIX.sub("", m) or m
 
 
-def docker_section(rows, max_containers=8, patterns=3):
-    """Konteneronkent osszesites: hibajellegu sorok szama + a leggyakoribb mintak (sok kulonbozo sor = egy problema)."""
+def docker_section(rows, max_containers=8, patterns=3, t_to=None):
+    """Konteneronkent osszesites: hibajellegu sorok szama + a leggyakoribb mintak (sok kulonbozo sor = egy problema),
+    t_to megadasakor az elso / utolso elofordulas a konteneren belul."""
     groups = {}
     for x in rows:
         try:
             n = int(x.get("hits", 0) or 0)
         except ValueError:
             n = 0
-        g = groups.setdefault((x.get("host", ""), x.get("appname", "")), {"total": 0, "pats": []})
+        g = groups.setdefault((x.get("host", ""), x.get("appname", "")), {"total": 0, "pats": [], "first": "", "last": ""})
         g["total"] += n
         g["pats"].append((n, strip_ts(x.get("_msg", ""))))
+        f, la = str(x.get("first") or ""), str(x.get("last") or "")
+        if f and (not g["first"] or f < g["first"]):
+            g["first"] = f
+        if la > g["last"]:
+            g["last"] = la
     out = []
     for (host, app), g in sorted(groups.items(), key=lambda kv: -kv[1]["total"])[:max_containers]:
         pats = sorted(g["pats"], key=lambda p: -p[0])[:patterns]
-        out.append(f"{host} | {app} | {g['total']} error-like lines | " + " || ".join(f"{n}x {cut(m, 130)}" for n, m in pats))
+        tm = timing(g["first"], g["last"], t_to) if t_to is not None else ""
+        out.append(f"{host} | {app} | {g['total']} error-like lines{' (' + tm + ')' if tm else ''} | "
+                   + " || ".join(f"{n}x {cut(m, 130)}" for n, m in pats))
     return out
 
 
@@ -551,12 +560,41 @@ def collect(t_from, t_to):
     """A modell bemenetehez szukseges nyers sorok egy idoablakra (VictoriaLogs-lekerdezesek)."""
     w = f"_time:[{iso(t_from)}, {iso(t_to)}]"
     return {
-        "a": vl_query(f"{w} pipeline:syslog -host:OPNsense* severity:in(notice,warning,err,crit,alert,emerg) | collapse_nums | stats by (host, appname, severity, _msg) count() as hits | sort by (hits desc) | limit 60"),
-        "b": vl_query(f"{w} _HOSTNAME:* PRIORITY:in(0,1,2,3,4,5) | collapse_nums | stats by (_HOSTNAME, SYSLOG_IDENTIFIER, _msg) count() as hits | sort by (hits desc) | limit 80"),
-        "c": vl_query(f"{w} appname:in(kuma,alert) | sort by (_time) | fields _time, appname, _msg | limit 12"),
+        "a": vl_query(f"{w} pipeline:syslog -host:OPNsense* severity:in(notice,warning,err,crit,alert,emerg) | collapse_nums | stats by (host, appname, severity, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 60"),
+        "b": vl_query(f"{w} _HOSTNAME:* PRIORITY:in(0,1,2,3,4,5) | collapse_nums | stats by (_HOSTNAME, SYSLOG_IDENTIFIER, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 80"),
+        # a LEGFRISSEBB esemenyek (a 24 oras ablakban a legregebbiek nem mutatjak a jelenlegi allapotot); a megjelenites idorendben
+        "c": sorted(vl_query(f"{w} appname:in(kuma,alert) | sort by (_time desc) | fields _time, appname, _msg | limit 12"), key=lambda x: str(x.get("_time", ""))),
         "e": vl_query(f'{w} SYSLOG_IDENTIFIER:kernel "Linux version" | stats by (_HOSTNAME) count() as hits'),
-        "d": vl_query(f'{w} pipeline:docker _msg:~"{DOCKER_ERR_RX}" | collapse_nums | stats by (host, appname, _msg) count() as hits | sort by (hits desc) | limit 200'),
+        "d": vl_query(f'{w} pipeline:docker _msg:~"{DOCKER_ERR_RX}" | collapse_nums | stats by (host, appname, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 200'),
     }
+
+
+def parse_ts(s):
+    """VictoriaLogs-idobelyeg (RFC3339, nanoszekundummal is) -> naiv UTC datetime vagy None."""
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", str(s or ""))
+    if not m:
+        return None
+    try:
+        return dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _ago(td):
+    m = int(td.total_seconds() // 60)
+    return f"{m}m" if m < 120 else f"{m // 60}h"
+
+
+def timing(first, last, t_to):
+    """Rovid idoadat a modellnek: mikor fordult elo eloszor / utoljara, az ablak vegehez kepest (a 'tart meg' vs 'elmult' donteshez)."""
+    t_end = t_to.replace(tzinfo=None) if getattr(t_to, "tzinfo", None) else t_to
+    lt, ft = parse_ts(last), parse_ts(first)
+    if lt is None:
+        return ""
+    last_s = "last <15m before end" if t_end - lt < dt.timedelta(minutes=15) else f"last {_ago(t_end - lt)} before end"
+    if ft is None or lt - ft < dt.timedelta(minutes=2):
+        return f"single burst, {last_s}"
+    return f"over {_ago(lt - ft)}, {last_s}"
 
 
 # (nyers szakasz, hoszt-mezo, azonosito-mezo): a zajszuro ezekre a sorokra hat
@@ -650,13 +688,17 @@ def build_input(known, t_from, t_to, extra_lines=None, raw=None):
     out = [f"WINDOW: {iso(t_from)} .. {iso(t_to)} (UTC)"]
     # A Docker-szakasz ELOL van: a leggyakrabban ott van az aktualis, ismetlodo hiba (a modell az elejen levo szakaszokra jobban figyel)
     out.append("== Docker containers, error-like log lines (per container: total, top message patterns):")
-    out.extend(docker_section(d))
-    out.append("== Syslog sources (HA, NAS, APs), notice+ (message pattern, count):")
+    out.extend(docker_section(d, t_to=t_to))
+
+    def tm(x):
+        s = timing(x.get("first"), x.get("last"), t_to)
+        return f" ({s})" if s else ""
+    out.append("== Syslog sources (HA, NAS, APs), notice+ (message pattern, count, timing):")
     for x in a:
-        out.append(f"{x.get('host')} | {x.get('appname')} | {x.get('severity')} | {x.get('hits')}x | {cut(x.get('_msg', ''), 160)}")
+        out.append(f"{x.get('host')} | {x.get('appname')} | {x.get('severity')} | {x.get('hits')}x{tm(x)} | {cut(x.get('_msg', ''), 160)}")
     out.append("== Journald hosts, PRIORITY<=5:")
     for x in b:
-        out.append(f"{x.get('_HOSTNAME')} | {x.get('SYSLOG_IDENTIFIER')} | {x.get('hits')}x | {cut(x.get('_msg', ''), 160)}")
+        out.append(f"{x.get('_HOSTNAME')} | {x.get('SYSLOG_IDENTIFIER')} | {x.get('hits')}x{tm(x)} | {cut(x.get('_msg', ''), 160)}")
     out.append("== Kuma and alert events:")
     for x in c:
         out.append(f"{str(x.get('_time', ''))[:19]} | {x.get('appname')} | {cut(x.get('_msg', ''), 140)}")
@@ -1116,7 +1158,7 @@ def run_job(job, known, pool, dry_run=False):
     issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job), thin_cap(job, evidence, stats))
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
-        "summary": out["summary"], "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
+        "summary": consistent_summary(out["summary"], issues, dropped), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
         "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded, "guard_notes": guard_notes,
     }
@@ -1142,6 +1184,19 @@ def run_job(job, known, pool, dry_run=False):
     STATUS["last_" + job["kind"]] = result
     log(f"{job['kind']} kesz ({secs}s, {len(issues)} ugy, {len(dropped)} ismert eldobva, vegpont {ep['url']})")
     return "done"
+
+
+def consistent_summary(summary, issues, dropped):
+    """Ha az utoszures ismert ugyet dobott el, a modell osszefoglaloja ra is hivatkozhat (2026-11-24: a kiszurt NAS-lemezhiba
+    'a legkritikusabb' maradt a szovegben). Ilyenkor a megmaradt ugyekbol determinisztikus osszefoglalo keszul."""
+    if not dropped:
+        return summary
+    known = f"{len(dropped)} known issue(s) left out"
+    if not issues:
+        return f"No new issues ({known})."
+    top = sorted(issues, key=lambda i: -SEVERITIES.index(i.get("severity", "info")) if i.get("severity") in SEVERITIES else 0)
+    parts = [f"[{i.get('severity', '?')}] {cut(i.get('title', ''), 90)}" for i in top[:5]]
+    return f"{len(issues)} issue(s): " + "; ".join(parts) + f" ({known})."
 
 
 def ground_issues(issues, user):
