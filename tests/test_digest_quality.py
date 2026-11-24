@@ -36,6 +36,65 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(aiops.consistent_summary("disk!", [], [issue("critical", "SMART")]), "No new issues (1 known issue(s) left out).")
 
 
+class SummaryMentionTests(unittest.TestCase):
+    """alpha.32: a modell az ismert ugyet nem jelenti, de az osszefoglaloban megemliti (dropped_known = 0)."""
+    def test_regex_mention(self):
+        import re
+        s = aiops.consistent_summary("Also a SMART failure on the NAS.", [issue("low", "x")], [], [re.compile("smart|sdb", re.I)])
+        self.assertEqual(s, "1 issue(s): [low] x (1 known issue(s) left out).")
+
+    def test_acknowledged_phrase_only_when_known_present(self):
+        txt = "Network issues. A critical disk failure was detected on the NAS (already acknowledged)."
+        self.assertEqual(aiops.consistent_summary(txt, [issue("high", "CS2 down")], [], [], known_present=False), txt)
+        s = aiops.consistent_summary(txt, [issue("high", "CS2 down")], [], [], known_present=True)
+        self.assertTrue(s.startswith("1 issue(s): [high] CS2 down"), s)
+
+    def test_prompt_forbids_mention(self):
+        self.assertIn("do not mention them in the summary", aiops.SYSTEM_PROMPT)
+
+
+class StaleGuardTests(unittest.TestCase):
+    """alpha.32: 'ongoing' ugy, amelynek minden bizonyito mintaja 2 oranal regebben abbamaradt -> resolved, legfeljebb low."""
+    END = dt.datetime(2026, 11, 24, 8, 15, tzinfo=dt.timezone.utc)
+    ROWS = [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2)),
+            ("homeassistant", "tuya_local", dt.datetime(2026, 11, 24, 8, 10)),
+            ("homesrv", "cloudflared", dt.datetime(2026, 11, 23, 21, 0)),
+            ("homesrv", "uptime-kuma", dt.datetime(2026, 11, 24, 7, 30))]
+
+    def mk(self, title, hosts, sev="medium", status="ongoing", ev=""):
+        return dict(issue(sev, title), hosts=hosts, status=status, evidence=ev)
+
+    def test_stale_issue_resolved_and_capped(self):
+        out, notes = aiops.guard_stale([self.mk("Immich DB connection", ["homesrv3"], ev="immich_server logged 17 errors")], self.ROWS, self.END)
+        self.assertEqual((out[0]["status"], out[0]["severity"]), ("resolved", "low"))
+        self.assertIn("medium -> low", notes[0])
+
+    def test_fresh_or_mixed_unchanged(self):
+        fresh = self.mk("Tuya refresh", ["homeassistant"], ev="tuya_local failing")
+        mixed = self.mk("Tunnel and monitors", ["homesrv"], sev="high", ev="cloudflared errors; uptime-kuma failing")
+        out, notes = aiops.guard_stale([fresh, mixed], self.ROWS, self.END)
+        self.assertEqual([o["status"] for o in out], ["ongoing", "ongoing"])
+        self.assertEqual(out[1]["severity"], "high")
+        self.assertEqual(notes, [])
+
+    def test_no_evidence_rows_or_resolved_unchanged(self):
+        none = self.mk("Something", ["nihil"], ev="journal upload")
+        done = self.mk("Immich", ["homesrv3"], status="resolved", sev="high", ev="immich_server")
+        out, notes = aiops.guard_stale([none, done], self.ROWS, self.END)
+        self.assertEqual(out, [none, done])
+        self.assertEqual(notes, [])
+
+    def test_missing_timestamp_is_not_stale(self):
+        rows = [("homesrv3", "immich_server", None)]
+        out, _ = aiops.guard_stale([self.mk("Immich", ["homesrv3"], ev="immich_server")], rows, self.END)
+        self.assertEqual(out[0]["status"], "ongoing")
+
+    def test_timed_rows_skip_noise(self):
+        k = aiops.Known()
+        raw = {"a": [], "b": [], "d": [{"host": "homesrv3", "appname": "immich_server", "_msg": "Error x", "hits": "3", "last": "2026-11-24T04:02:00.5Z"}]}
+        self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2))])
+
+
 class TimingTests(unittest.TestCase):
     def test_single_burst_hours_ago(self):
         self.assertEqual(aiops.timing("2026-11-24T04:02:10.5Z", "2026-11-24T04:02:40.1Z", END), "single burst, last 2h before end")

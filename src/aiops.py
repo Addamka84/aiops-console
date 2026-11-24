@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.31"
+__version__ = "2.0.0-alpha.32"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -139,7 +139,7 @@ The "Docker containers" section lists, per container, how many error-like lines 
 Report every host reboot shown in the "Kernel boots" section as one info-level issue (status resolved). Do not invent reboots when that section is empty.
 Set status: new / ongoing / resolved (resolved if the logs show recovery, e.g. 'OK' after 'not responding', or Up after Down).
 Timing in parentheses ("single burst", "over 9h", "last 3h before end") tells when a pattern occurred: a problem whose lines stopped hours before the end of the window is NOT ongoing (use resolved, severity low unless it caused an outage); a single short burst is low. A few lines spread over many hours (e.g. a handful of reconnects) are transient: low. Only lines still occurring near the end ("last <15m before end") can be ongoing.
-A pre-filter has already removed known-harmless noise from the input. If the input has a "Known issues present" section, those problems are already acknowledged: NEVER report them (not even as info).
+A pre-filter has already removed known-harmless noise from the input. If the input has a "Known issues present" section, those problems are already acknowledged: NEVER report them (not even as info) and do not mention them in the summary.
 If nothing else looks wrong, return an empty issues list and all_clear=true."""
 
 TOPOLOGY_PROMPT = """
@@ -1156,9 +1156,12 @@ def run_job(job, known, pool, dry_run=False):
     issues, dropped = known.post_filter(out["issues"])
     issues, ungrounded = ground_issues(issues, user)
     issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job), thin_cap(job, evidence, stats))
+    issues, stale_notes = guard_stale(issues, timed_rows(known, raw), t_to)
+    guard_notes += stale_notes
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
-        "summary": consistent_summary(out["summary"], issues, dropped), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
+        "summary": consistent_summary(out["summary"], issues, dropped, [ki["match_output"] for ki in known.issues],
+                                      "== Known issues present" in user), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
         "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded, "guard_notes": guard_notes,
     }
@@ -1186,12 +1189,19 @@ def run_job(job, known, pool, dry_run=False):
     return "done"
 
 
-def consistent_summary(summary, issues, dropped):
-    """Ha az utoszures ismert ugyet dobott el, a modell osszefoglaloja ra is hivatkozhat (2026-11-24: a kiszurt NAS-lemezhiba
-    'a legkritikusabb' maradt a szovegben). Ilyenkor a megmaradt ugyekbol determinisztikus osszefoglalo keszul."""
-    if not dropped:
+_ACK_RX = re.compile(r"(?i)\b(already acknowledged|acknowledged|known issue|already known)\b")
+
+
+def consistent_summary(summary, issues, dropped, known_rx=(), known_present=False):
+    """Ha az utoszures ismert ugyet dobott el, vagy a modell osszefoglaloja egy ismert ugyre hivatkozik (a match_output regexe szerint, vagy
+    - ha a bemenetben volt 'Known issues present' szakasz - 'acknowledged' / 'known issue' szoval), a szoveg ismert ugyrol beszel
+    (2026-11-24: a kiszurt NAS-lemezhiba 'a legkritikusabb' maradt; kesobb 'A critical disk failure ... (already acknowledged)').
+    Ilyenkor a megmaradt ugyekbol determinisztikus osszefoglalo keszul."""
+    s = str(summary or "")
+    mentions = sum(1 for rx in known_rx if rx.search(s)) or (1 if known_present and _ACK_RX.search(s) else 0)
+    if not dropped and not mentions:
         return summary
-    known = f"{len(dropped)} known issue(s) left out"
+    known = f"{max(len(dropped), mentions)} known issue(s) left out"
     if not issues:
         return f"No new issues ({known})."
     top = sorted(issues, key=lambda i: -SEVERITIES.index(i.get("severity", "info")) if i.get("severity") in SEVERITIES else 0)
@@ -1244,6 +1254,45 @@ def detector_cap(job):
         return None
     sevs = [d.get("severity", "medium") for d in dets if d.get("severity", "medium") in SEVERITIES]
     return max(sevs, key=SEVERITIES.index) if sevs else None
+
+
+STALE_H = 2        # ennyi oranal regebben abbamaradt minta mar nem 'folyamatban levo' problema
+
+
+def timed_rows(known, raw):
+    """A modellnek atadott (nem zaj, nem ismert) mintasorok: (host, azonosito, utolso elofordulas) a stale-ellenorzeshez."""
+    out = []
+    for sec, hf, idf in FILTERED_SECTIONS:
+        for x in raw.get(sec, []) or []:
+            if known.classify_row(row_text(x, hf, idf))[0] in ("noise", "known"):
+                continue
+            out.append((str(x.get(hf, "")).lower(), str(x.get(idf, "")).lower(), parse_ts(x.get("last"))))
+    return out
+
+
+def guard_stale(issues, rows, t_to, hours=STALE_H):
+    """Determinisztikus: ha egy 'new'/'ongoing' ugy MINDEN bizonyito mintaja (hoszt az ugy hosts-listajaban, azonosito a cimben/bizonyitekban)
+    tobb mint `hours` oraval az ablak vege elott abbamaradt, az ugy 'resolved', a sulyossag legfeljebb 'low' (2026-11-24: az Immich egyszeri
+    04:02-es hibasorozata a 08:15-os digestben 'medium/ongoing' maradt, pedig a modell maga irta: 4 oraja nincs ilyen sor).
+    Ha nincs azonosithato bizonyito minta, vagy barmelyik friss / idotlen, az ugy valtozatlan. -> (ugyek, megjegyzesek)"""
+    t_end = t_to.replace(tzinfo=None) if getattr(t_to, "tzinfo", None) else t_to
+    limit = t_end - dt.timedelta(hours=hours)
+    out, notes = [], []
+    for i in issues:
+        if i.get("status") not in ("new", "ongoing"):
+            out.append(i)
+            continue
+        hosts = {str(h).lower() for h in i.get("hosts", [])}
+        text = " ".join(str(i.get(k, "")) for k in ("title", "evidence")).lower()
+        lasts = [last for host, ident, last in rows if host in hosts and len(ident) >= 3 and ident in text]
+        if lasts and all(la is not None and la < limit for la in lasts):
+            sev = i.get("severity", "info")
+            new_sev = "low" if sev in SEVERITIES and SEVERITIES.index(sev) > SEVERITIES.index("low") else sev
+            i = dict(i, status="resolved", severity=new_sev)
+            notes.append(f"'{cut(i.get('title', ''), 60)}': no matching lines in the last {hours} h -> resolved"
+                         + (f", severity {sev} -> {new_sev}" if new_sev != sev else ""))
+        out.append(i)
+    return out, notes
 
 
 THIN_LINES = 5     # ennyi vagy kevesebb megtartott (nem zaj, nem ismert) naplosor az ablakban = vekony bizonyitek
