@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.32"
+__version__ = "2.0.0-alpha.33"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -140,6 +140,7 @@ Report every host reboot shown in the "Kernel boots" section as one info-level i
 Set status: new / ongoing / resolved (resolved if the logs show recovery, e.g. 'OK' after 'not responding', or Up after Down).
 Timing in parentheses ("single burst", "over 9h", "last 3h before end") tells when a pattern occurred: a problem whose lines stopped hours before the end of the window is NOT ongoing (use resolved, severity low unless it caused an outage); a single short burst is low. A few lines spread over many hours (e.g. a handful of reconnects) are transient: low. Only lines still occurring near the end ("last <15m before end") can be ongoing.
 A pre-filter has already removed known-harmless noise from the input. If the input has a "Known issues present" section, those problems are already acknowledged: NEVER report them (not even as info) and do not mention them in the summary.
+Events marked "[informational]" in the Kuma and alert section are context, not failures: a graceful restart (exit code 0, e.g. after an update) is NOT a crash. Do not call something "crashes" unless the logs show an abnormal exit.
 If nothing else looks wrong, return an empty issues list and all_clear=true."""
 
 TOPOLOGY_PROMPT = """
@@ -561,9 +562,12 @@ def collect(t_from, t_to):
     w = f"_time:[{iso(t_from)}, {iso(t_to)}]"
     return {
         "a": vl_query(f"{w} pipeline:syslog -host:OPNsense* severity:in(notice,warning,err,crit,alert,emerg) | collapse_nums | stats by (host, appname, severity, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 60"),
-        "b": vl_query(f"{w} _HOSTNAME:* PRIORITY:in(0,1,2,3,4,5) | collapse_nums | stats by (_HOSTNAME, SYSLOG_IDENTIFIER, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 80"),
-        # a LEGFRISSEBB esemenyek (a 24 oras ablakban a legregebbiek nem mutatjak a jelenlegi allapotot); a megjelenites idorendben
-        "c": sorted(vl_query(f"{w} appname:in(kuma,alert) | sort by (_time desc) | fields _time, appname, _msg | limit 12"), key=lambda x: str(x.get("_time", ""))),
+        "b": vl_query(f"{w} _HOSTNAME:* PRIORITY:in(0,1,2,3,4,5) | collapse_nums | stats by (_HOSTNAME, SYSLOG_IDENTIFIER, PRIORITY, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 80"),
+        # a LEGFRISSEBB esemenyek (a 24 oras ablakban a legregebbiek nem mutatjak a jelenlegi allapotot); a megjelenites idorendben.
+        # A riasztas sulyossaga / notify cimkeje: az informacios riasztas (notify: none, severity: info) nem hiba (2026-11-25: a HA
+        # szabalyos ujrainditasa 'Repeated crashes, high' lett).
+        "c": sorted(vl_query(f'{w} appname:in(kuma,alert) | sort by (_time desc) | fields _time, appname, _msg, "commonLabels.severity", "commonLabels.notify" | limit 12'),
+                    key=lambda x: str(x.get("_time", ""))),
         "e": vl_query(f'{w} SYSLOG_IDENTIFIER:kernel "Linux version" | stats by (_HOSTNAME) count() as hits'),
         "d": vl_query(f'{w} pipeline:docker _msg:~"{DOCKER_ERR_RX}" | collapse_nums | stats by (host, appname, _msg) count() as hits, min(_time) as first, max(_time) as last | sort by (hits desc) | limit 200'),
     }
@@ -655,6 +659,22 @@ def analyze_known(known, raw, samples=4, kept_top=15):
     }
 
 
+def informational(x):
+    """Kuma/riasztas esemeny: informacios (notify: none vagy severity: info), nem hiba."""
+    return x.get("appname") == "alert" and (str(x.get("commonLabels.notify", "")).lower() == "none"
+                                            or str(x.get("commonLabels.severity", "")).lower() == "info")
+
+
+def severe_event(x):
+    """Kuma/riasztas esemeny, amely magas sulyossagot alapozhat meg: Kuma 'down', vagy critical/high riasztas (nem informacios, nem
+    feloldas). A warning szintu riasztas (pl. HomeAssistantErrors) maga is hibaszamlalas, nem bizonyitja a 'high'-ot."""
+    msg = str(x.get("_msg", "")).lower()
+    if x.get("appname") == "kuma":
+        return "down" in msg
+    return (x.get("appname") == "alert" and not informational(x) and not msg.startswith("[resolved]")
+            and str(x.get("commonLabels.severity", "")).lower() in ("critical", "high"))
+
+
 def build_input(known, t_from, t_to, extra_lines=None, raw=None):
     """A modell bemenete egy idoablakra (a build-cases.ps1 megfeleloje)."""
     raw = raw or collect(t_from, t_to)
@@ -701,7 +721,8 @@ def build_input(known, t_from, t_to, extra_lines=None, raw=None):
         out.append(f"{x.get('_HOSTNAME')} | {x.get('SYSLOG_IDENTIFIER')} | {x.get('hits')}x{tm(x)} | {cut(x.get('_msg', ''), 160)}")
     out.append("== Kuma and alert events:")
     for x in c:
-        out.append(f"{str(x.get('_time', ''))[:19]} | {x.get('appname')} | {cut(x.get('_msg', ''), 140)}")
+        tag = "[informational] " if informational(x) else ""
+        out.append(f"{str(x.get('_time', ''))[:19]} | {x.get('appname')} | {tag}{cut(x.get('_msg', ''), 140)}")
     out.append("== Kernel boots (reboots):")
     for x in e:
         out.append(f"{x.get('_HOSTNAME')}: {x.get('hits')}x")
@@ -1156,12 +1177,19 @@ def run_job(job, known, pool, dry_run=False):
     issues, dropped = known.post_filter(out["issues"])
     issues, ungrounded = ground_issues(issues, user)
     issues, guard_notes = guard_severity(issues, user, evidence, vocabulary(known), detector_cap(job), thin_cap(job, evidence, stats))
-    issues, stale_notes = guard_stale(issues, timed_rows(known, raw), t_to)
+    changed = any("->" in n for n in guard_notes)          # a guard_severity atirt-e sulyossagot
+    rows = timed_rows(known, raw)
+    if job["kind"] != "incident":                          # incidensnel a guard_severity err-szabalya mar ervenyes
+        issues, level_notes = guard_digest_level(issues, rows, raw.get("c") or [])
+        guard_notes += level_notes
+        changed = changed or bool(level_notes)
+    issues, stale_notes = guard_stale(issues, rows, t_to)
     guard_notes += stale_notes
+    changed = changed or bool(stale_notes)
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": consistent_summary(out["summary"], issues, dropped, [ki["match_output"] for ki in known.issues],
-                                      "== Known issues present" in user), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
+                                      "== Known issues present" in user, changed and job["kind"] != "incident"), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
         "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded, "guard_notes": guard_notes,
     }
@@ -1192,21 +1220,24 @@ def run_job(job, known, pool, dry_run=False):
 _ACK_RX = re.compile(r"(?i)\b(already acknowledged|acknowledged|known issue|already known)\b")
 
 
-def consistent_summary(summary, issues, dropped, known_rx=(), known_present=False):
+def consistent_summary(summary, issues, dropped, known_rx=(), known_present=False, changed=False):
     """Ha az utoszures ismert ugyet dobott el, vagy a modell osszefoglaloja egy ismert ugyre hivatkozik (a match_output regexe szerint, vagy
     - ha a bemenetben volt 'Known issues present' szakasz - 'acknowledged' / 'known issue' szoval), a szoveg ismert ugyrol beszel
     (2026-11-24: a kiszurt NAS-lemezhiba 'a legkritikusabb' maradt; kesobb 'A critical disk failure ... (already acknowledged)').
-    Ilyenkor a megmaradt ugyekbol determinisztikus osszefoglalo keszul."""
+    Ilyenkor a megmaradt ugyekbol determinisztikus osszefoglalo keszul. Akkor is, ha egy vedelem (changed) egy ugy sulyossagat vagy
+    allapotat atirta (2026-11-25: a 'resolved/low'-ra tett mentes- es Cloudflare-ugy a szovegben 'is failing' maradt)."""
     s = str(summary or "")
     mentions = sum(1 for rx in known_rx if rx.search(s)) or (1 if known_present and _ACK_RX.search(s) else 0)
-    if not dropped and not mentions:
+    if not dropped and not mentions and not changed:
         return summary
-    known = f"{max(len(dropped), mentions)} known issue(s) left out"
+    n_known = max(len(dropped), mentions)
+    known = f" ({n_known} known issue(s) left out)" if n_known else ""
     if not issues:
-        return f"No new issues ({known})."
-    top = sorted(issues, key=lambda i: -SEVERITIES.index(i.get("severity", "info")) if i.get("severity") in SEVERITIES else 0)
-    parts = [f"[{i.get('severity', '?')}] {cut(i.get('title', ''), 90)}" for i in top[:5]]
-    return f"{len(issues)} issue(s): " + "; ".join(parts) + f" ({known})."
+        return f"No new issues{known}."
+    top = sorted(issues, key=lambda i: (i.get("status") == "resolved",
+                                        -SEVERITIES.index(i["severity"]) if i.get("severity") in SEVERITIES else 0))
+    parts = [f"[{i.get('severity', '?')}{', resolved' if i.get('status') == 'resolved' else ''}] {cut(i.get('title', ''), 90)}" for i in top[:5]]
+    return f"{len(issues)} issue(s): " + "; ".join(parts) + f"{known}."
 
 
 def ground_issues(issues, user):
@@ -1259,15 +1290,63 @@ def detector_cap(job):
 STALE_H = 2        # ennyi oranal regebben abbamaradt minta mar nem 'folyamatban levo' problema
 
 
+SYSLOG_LEVELS = {"emerg": 0, "alert": 1, "crit": 2, "err": 3, "error": 3, "warning": 4, "warn": 4, "notice": 5, "info": 6, "debug": 7}
+
+
+def row_level(sec, x):
+    """Syslog-szint (0 emerg .. 7 debug) egy nyers mintasorhoz, vagy None, ha nem ismert. A Docker-sorok 'hibajelleguek' (regex), a
+    naplo nem ad szintet: err (3)."""
+    if sec == "a":
+        return SYSLOG_LEVELS.get(str(x.get("severity", "")).lower())
+    if sec == "b":
+        try:
+            return int(x.get("PRIORITY"))
+        except (TypeError, ValueError):
+            return None
+    return 3
+
+
 def timed_rows(known, raw):
-    """A modellnek atadott (nem zaj, nem ismert) mintasorok: (host, azonosito, utolso elofordulas) a stale-ellenorzeshez."""
+    """A modellnek atadott (nem zaj, nem ismert) mintasorok: (host, azonosito, utolso elofordulas, syslog-szint) a stale- es
+    szint-ellenorzeshez."""
     out = []
     for sec, hf, idf in FILTERED_SECTIONS:
         for x in raw.get(sec, []) or []:
             if known.classify_row(row_text(x, hf, idf))[0] in ("noise", "known"):
                 continue
-            out.append((str(x.get(hf, "")).lower(), str(x.get(idf, "")).lower(), parse_ts(x.get("last"))))
+            out.append((str(x.get(hf, "")).lower(), str(x.get(idf, "")).lower(), parse_ts(x.get("last")), row_level(sec, x)))
     return out
+
+
+def _issue_rows(i, rows):
+    """Az ugy bizonyito mintasorai: a hoszt az ugy hosts-listajaban, az azonosito (>= 3 jel) a cimben vagy a bizonyitekban
+    (szokozok nelkul is: 'Home Assistant' ~ 'homeassistant')."""
+    hosts = {str(h).lower() for h in i.get("hosts", [])}
+    text = " ".join(str(i.get(k, "")) for k in ("title", "evidence")).lower()
+    flat = re.sub(r"[\s_-]+", "", text)
+    return [r for r in rows if r[0] in hosts and len(r[1]) >= 3 and (r[1] in text or re.sub(r"[\s_-]+", "", r[1]) in flat)]
+
+
+def guard_digest_level(issues, rows, alerts=()):
+    """Napi osszefoglalo (2026-11-25): ha egy 'high'/'critical' ugy MINDEN bizonyito mintasora legfeljebb err-szintu (nincs crit/alert/emerg),
+    es nincs hozza nem-informacios Kuma/riasztas esemeny (a hosztja vagy az azonositoja nem szerepel benne), a sulyossag legfeljebb 'medium'
+    (az incidensnel mar meglevo 'error-level only' szabaly parja). Bizonyito sor nelkul, vagy ismeretlen szintnel az ugy valtozatlan.
+    Hatrany: egy valoban sulyos, de csak err-szinten naplozo hiba is medium marad. -> (ugyek, megjegyzesek)"""
+    alert_txt = " ".join(str(a.get("_msg", "")) for a in alerts if severe_event(a)).lower()
+    out, notes = [], []
+    for i in issues:
+        sev = i.get("severity", "info")
+        if sev not in SEVERITIES or SEVERITIES.index(sev) <= SEVERITIES.index("medium"):
+            out.append(i)
+            continue
+        ev = _issue_rows(i, rows)
+        levels = [r[3] if len(r) > 3 else None for r in ev]
+        corroborated = any(r[0] in alert_txt or r[1] in alert_txt for r in ev)
+        if ev and all(lv is not None and lv >= 3 for lv in levels) and not corroborated:
+            i = dict(i, severity="medium")
+            notes.append(f"'{cut(i.get('title', ''), 60)}': severity {sev} -> medium: evidence is error-level only")
+        out.append(i)
+    return out, notes
 
 
 def guard_stale(issues, rows, t_to, hours=STALE_H):
@@ -1282,9 +1361,7 @@ def guard_stale(issues, rows, t_to, hours=STALE_H):
         if i.get("status") not in ("new", "ongoing"):
             out.append(i)
             continue
-        hosts = {str(h).lower() for h in i.get("hosts", [])}
-        text = " ".join(str(i.get(k, "")) for k in ("title", "evidence")).lower()
-        lasts = [last for host, ident, last in rows if host in hosts and len(ident) >= 3 and ident in text]
+        lasts = [r[2] for r in _issue_rows(i, rows)]
         if lasts and all(la is not None and la < limit for la in lasts):
             sev = i.get("severity", "info")
             new_sev = "low" if sev in SEVERITIES and SEVERITIES.index(sev) > SEVERITIES.index("low") else sev

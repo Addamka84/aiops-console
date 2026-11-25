@@ -92,7 +92,53 @@ class StaleGuardTests(unittest.TestCase):
     def test_timed_rows_skip_noise(self):
         k = aiops.Known()
         raw = {"a": [], "b": [], "d": [{"host": "homesrv3", "appname": "immich_server", "_msg": "Error x", "hits": "3", "last": "2026-11-24T04:02:00.5Z"}]}
-        self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2))])
+        self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2), 3)])
+
+
+class Alpha33Tests(unittest.TestCase):
+    """alpha.33 (2026-11-25-i digest): a vedelem utan ujraepitett osszefoglalo; err-szintu korlat a digestben; informacios riasztas."""
+    HA = dict(issue("high", "Home Assistant: Repeated crashes requiring restart"), hosts=["homeassistant"],
+              evidence="152 error lines in Home Assistant logs ('ERROR (MainThread)', 'Traceback')")
+    ROWS = [("homeassistant", "homeassistant", dt.datetime(2026, 11, 25, 6, 24), 3)]
+    RESTART = {"appname": "alert", "_msg": "[FIRING] HomeAssistantRestarted x1 Home Assistant restarted (graceful stop, exit code 0)",
+               "commonLabels.severity": "info", "commonLabels.notify": "none"}
+
+    def test_summary_rebuilt_when_guard_changed(self):
+        res = dict(issue("low", "Backup failure"), status="resolved")
+        s = aiops.consistent_summary("The backup service is failing.", [res, issue("medium", "HA errors")], [], changed=True)
+        self.assertEqual(s, "2 issue(s): [medium] HA errors; [low, resolved] Backup failure.")
+        self.assertEqual(aiops.consistent_summary("ok", [res], [], changed=False), "ok")
+
+    def test_error_level_only_capped(self):
+        out, notes = aiops.guard_digest_level([self.HA], self.ROWS, [self.RESTART])
+        self.assertEqual(out[0]["severity"], "medium")
+        self.assertIn("high -> medium", notes[0])
+
+    def test_crit_row_or_severe_event_not_capped(self):
+        crit = [("homeassistant", "homeassistant", None, 2)]
+        self.assertEqual(aiops.guard_digest_level([self.HA], crit)[0][0]["severity"], "high")
+        down = {"appname": "kuma", "_msg": "[Home Assistant / homeassistant] [Down] Failed all 3 attempts"}
+        self.assertEqual(aiops.guard_digest_level([self.HA], self.ROWS, [down])[0][0]["severity"], "high")
+        unknown = [("homeassistant", "homeassistant", None, None)]
+        self.assertEqual(aiops.guard_digest_level([self.HA], unknown)[0][0]["severity"], "high")
+        self.assertEqual(aiops.guard_digest_level([self.HA], [])[0][0]["severity"], "high")   # nincs bizonyito sor
+
+    def test_warning_alert_does_not_corroborate(self):
+        w = {"appname": "alert", "_msg": "[FIRING] HomeAssistantErrors homeassistant: 45 errors", "commonLabels.severity": "warning"}
+        self.assertEqual(aiops.guard_digest_level([self.HA], self.ROWS, [w])[0][0]["severity"], "medium")
+
+    def test_row_levels(self):
+        self.assertEqual(aiops.row_level("a", {"severity": "crit"}), 2)
+        self.assertEqual(aiops.row_level("b", {"PRIORITY": "4"}), 4)
+        self.assertIsNone(aiops.row_level("b", {}))
+        self.assertEqual(aiops.row_level("d", {}), 3)
+
+    def test_informational_alert_tagged_in_input(self):
+        raw = {"a": [], "b": [], "e": [], "d": [], "c": [self.RESTART, {"appname": "kuma", "_msg": "[X] [Down] y"}]}
+        txt = aiops.build_input(aiops.Known(), END - dt.timedelta(hours=24), END, raw=raw)
+        self.assertIn("| alert | [informational] [FIRING] HomeAssistantRestarted", txt)
+        self.assertNotIn("[informational] [X]", txt)
+        self.assertIn("graceful restart", aiops.SYSTEM_PROMPT)
 
 
 class TimingTests(unittest.TestCase):
