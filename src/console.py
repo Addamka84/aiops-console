@@ -66,6 +66,16 @@ class TestIn(BaseModel):
     patch: dict | None = None
 
 
+class ExplainIn(BaseModel):
+    host: str = Field("", max_length=200)
+    ident: str = Field("", max_length=200)
+    message: str = Field(..., min_length=1, max_length=4000)
+    source: str = Field("syslog", max_length=20)
+    level: str | None = Field(None, max_length=20)
+    hours: int = 24              # 0: csak a szabalyok, elo ablak nelkul
+    content: dict | None = None  # a meg nem mentett known-szerkesztes (ha nincs: a mentett dokumentum)
+
+
 class TopoTestIn(BaseModel):
     text: str = ""
     content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett topologia)
@@ -338,6 +348,32 @@ def create_app(rt, tokens=None):
         base = aiops.analyze_known(aiops.Known(data=cur), raw)
         res["baseline"] = {"noise_patterns": base["noise_patterns"], "noise_lines": base["noise_lines"],
                            "known_patterns": base["known_patterns"], "kept_patterns": base["kept_patterns"]}
+        return res
+
+    @app.post("/api/v1/explain")
+    def explain(body: ExplainIn, _: Actor = Depends(read)):
+        """'Miert nem jelent meg?': egy naplosor utja a modell bemenetebe (szint -> zaj -> snooze -> ismert ugy -> mintakorlat).
+        Csak olvas; hours > 0 eseten az elo ablak (a modellnek gyujtott sorok) alapjan a mintakorlatot is megnezi."""
+        if not 0 <= body.hours <= 168:
+            raise HTTPException(422, {"errors": ["hours must be between 0 and 168"]})
+        doc = body.content if body.content is not None else store.current("known")["content"]
+        try:
+            runtime.validate_doc("known", doc)
+        except runtime.DocError as e:
+            fail(e)
+        raw = None
+        if body.hours:
+            try:
+                raw = rt.raw_rows(body.hours)
+            except (OSError, ValueError) as e:
+                raise HTTPException(502, vl_down(e))
+        try:
+            res = aiops.explain_line(aiops.Known(data=doc), body.host, body.ident, body.message, body.source, body.level,
+                                     raw=raw, must_keep=doc.get("must_keep", []),
+                                     lookup=(lambda s, h, i, m: aiops.count_line(s, h, i, m, body.hours)) if body.hours else None)
+        except ValueError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        res["hours"] = body.hours
         return res
 
     @app.post("/api/v1/test/ingest")

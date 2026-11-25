@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.33"
+__version__ = "2.0.0-alpha.34"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -673,6 +673,204 @@ def severe_event(x):
         return "down" in msg
     return (x.get("appname") == "alert" and not informational(x) and not msg.startswith("[resolved]")
             and str(x.get("commonLabels.severity", "")).lower() in ("critical", "high"))
+
+
+# ---------------------------------------------------------------- "Miert nem jelent meg?" (egy naplosor utja az elofeldolgozason at)
+
+SECTION_CAPS = {"a": 14, "b": 16}          # a build_input szakaszonkenti mintakorlatja (a Docker: 8 kontener x 3 minta)
+COLLECT_LIMITS = {"a": 60, "b": 80, "d": 200}   # a collect() lekerdezeseinek 'limit'-je (a leggyakoribb mintak)
+DOCKER_CAP = (8, 3)
+SYSLOG_LEVELS_IN = ("notice", "warning", "err", "crit", "alert", "emerg")
+SOURCES = ("syslog", "journald", "docker")
+_SECTION_OF = {"syslog": ("a", "host", "appname"), "journald": ("b", "_HOSTNAME", "SYSLOG_IDENTIFIER"), "docker": ("d", "host", "appname")}
+
+
+def norm_msg(s):
+    """Az uzenet osszehasonlithato alakja: a szamok <N>, a kontener-idobelyeg-elotag nelkul, kisbetus, szokozok osszevonva
+    (a VictoriaLogs collapse_nums kozelitese)."""
+    return strip_ts(re.sub(r"\d+", "<N>", str(s or ""))).lower()
+
+
+def level_gate(source, level, msg):
+    """Atjut-e a sor a modell bemenetenek szint-szuron (collect lekerdezesei). -> (True | False | None, magyarazat)"""
+    if source == "docker":
+        ok = bool(re.search(DOCKER_ERR_RX, str(msg or "")))
+        return ok, ("the message contains an error-like word" if ok else
+                    "Docker lines reach the model only if they contain an error-like word (error, failed, timeout, ...)")
+    if level is None or str(level).strip() == "":
+        return None, "level not given: cannot tell whether the level filter lets it through"
+    if source == "syslog":
+        lv = str(level).strip().lower()
+        lv = {"error": "err", "warn": "warning", "critical": "crit", "emergency": "emerg"}.get(lv, lv)
+        ok = lv in SYSLOG_LEVELS_IN
+        return ok, (f"syslog level '{lv}' is notice or above" if ok else f"syslog level '{lv}' is below notice: only notice and above reach the model")
+    try:
+        p = int(str(level).strip())
+    except ValueError:
+        return None, f"journald PRIORITY must be a number 0-7, got {str(level)[:20]!r}"
+    ok = 0 <= p <= 5
+    return ok, (f"journald PRIORITY {p} is 5 (notice) or more severe" if ok else f"journald PRIORITY {p} is above 5: only PRIORITY 0-5 reaches the model")
+
+
+def line_literal(msg):
+    """A leghosszabb szamjegy nelkuli szakasz az uzenetbol (min. 6 jel) a celzott kereseshez, vagy ''."""
+    parts = [p.strip(" \t:;,.=[](){}'\"") for p in re.split(r"\S*\d\S*", str(msg or ""))]
+    best = max(parts, key=len, default="")
+    return best[:120] if len(best) >= 6 else ""
+
+
+def count_line(source, host, ident, msg, hours):
+    """Celzott, csak olvaso kereses: hanyszor szerepel a sor (hoszt + azonosito + a leghosszabb szoszerkezet) az ablakban, barmely szinten.
+    -> {'hits', 'first', 'last'} vagy None (nincs mire keresni)."""
+    lit = line_literal(strip_ts(msg) if source == "docker" else msg)
+    if not lit:
+        return None
+    _, hf, idf = _SECTION_OF[source]
+    q = (f"_time:{int(hours)}h {hf}:={json.dumps(host)} {idf}:={json.dumps(ident)} {json.dumps(lit)}"
+         " | stats count() as hits, min(_time) as first, max(_time) as last")
+    rows = vl_query(q, timeout=20)
+    r = rows[0] if rows else {}
+    return {"hits": _int(r.get("hits")), "first": r.get("first"), "last": r.get("last"), "phrase": lit}
+
+
+def explain_line(known, host, ident, msg, source="syslog", level=None, raw=None, now=None, must_keep=(), lookup=None):
+    """Egy naplosor utja a napi osszefoglalo / incidens bemenetebe, a termeles sorrendjeben: szint-szuro -> zajszabaly -> snooze ->
+    ismert ugy -> szakaszonkenti mintakorlat (raw megadasakor az elo ablak alapjan). Csak olvas. -> dict (steps, verdict, live)"""
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {', '.join(SOURCES)}")
+    host, ident = str(host or "").strip(), str(ident or "").strip()
+    tmpl = re.sub(r"\d+", "<N>", re.sub(r"\s+", " ", str(msg or "")).strip())
+    if source == "docker":
+        tmpl = strip_ts(tmpl)
+    text = f"{host} | {ident} | {tmpl}"
+    steps = []
+    outcome, summary = None, ""
+
+    ok, why = level_gate(source, level, msg)
+    if source == "syslog" and host.lower().startswith("opnsense"):
+        ok, why = False, "OPNsense syslog is left out of the model input (firewall logs are handled separately)"
+    steps.append({"step": "level", "result": {True: "pass", False: "stop", None: "unknown"}[ok], "detail": why})
+    if ok is False:
+        outcome, summary = "filtered", why
+
+    noise = [{"index": i, "regex": rx.pattern} for i, rx in enumerate(known.noise) if rx.search(text)]
+    steps.append({"step": "noise", "result": "stop" if noise else "pass",
+                  "detail": (f"noise rule #{noise[0]['index'] + 1} matches: {noise[0]['regex']}" + (f" (and {len(noise) - 1} more)" if len(noise) > 1 else ""))
+                  if noise else "no noise rule matches", "matches": noise[:10]})
+    if noise and not outcome:
+        outcome, summary = "suppressed", f"removed before the model by noise rule #{noise[0]['index'] + 1}"
+
+    now = now or utcnow().replace(tzinfo=None)
+    sn = [{"id": s["id"], "regex": s["regex"], "until": s["until"].strftime(UNTIL_FMT) if s["until"] else "", "active": bool(s["until"] and s["until"] > now)}
+          for s in known.snoozes if s["rx"].search(text)]
+    act = [s for s in sn if s["active"]]
+    steps.append({"step": "snooze", "result": "stop" if act else "pass",
+                  "detail": (f"snoozed until {act[0]['until']} ({act[0]['id']})" if act else
+                             f"a snooze matches but expired at {sn[0]['until']} ({sn[0]['id']})" if sn else "no active snooze matches"),
+                  "matches": sn[:10]})
+    if act and not outcome:
+        outcome, summary = "snoozed", f"snoozed until {act[0]['until']} ({act[0]['id']})"
+
+    kis = [{"id": k["id"], "note": k["note"]} for k in known.issues if k["match"].search(text)]
+    steps.append({"step": "known", "result": "stop" if kis else "pass",
+                  "detail": f"known issue '{kis[0]['id']}': the model is told it is acknowledged and its output about it is dropped" if kis else "no known issue matches",
+                  "matches": kis[:10]})
+    if kis and not outcome:
+        outcome, summary = "known", f"known issue '{kis[0]['id']}': acknowledged, not reported"
+
+    nt = norm_msg(tmpl)
+    mk = next((x for x in must_keep if norm_msg(x) == nt or (len(nt) >= 12 and nt in norm_msg(x))), None)
+
+    live = None
+    if raw is not None:
+        live = _explain_live(known, raw, source, host, ident, tmpl)
+        if not live["found"] and lookup is not None:
+            try:
+                c = lookup(source, host, ident, msg)
+            except (OSError, ValueError) as e:
+                c = None
+                live["detail"] += f" (targeted search failed: {type(e).__name__})"
+            if c is not None:
+                live["logged"] = c
+                lim = COLLECT_LIMITS[_SECTION_OF[source][0]]
+                if c["hits"] and ok is None:
+                    live["detail"] = (f"logged {c['hits']}x in the window, but not among the collected lines: either its level is left out, or it is too rare "
+                                      f"(only the {lim} most frequent {source} patterns are collected). Give the level to tell which.")
+                elif c["hits"] and ok:
+                    live.update(found=True, capped=True, hits=c["hits"], first=c.get("first"), last=c.get("last"),
+                                detail=f"logged {c['hits']}x in the window (last {str(c.get('last', ''))[:19]} UTC), but too rare: only the {lim} most frequent "
+                                       f"{source} patterns are collected for the model")
+                elif c["hits"]:
+                    live["detail"] = f"logged {c['hits']}x in the window, at a level the model input leaves out"
+                else:
+                    live["detail"] = f"not logged in the window with this host, {'container' if source == 'docker' else 'ident'} and phrase ({c['phrase'][:60]!r})"
+        if live["found"]:
+            steps.append({"step": "volume", "result": "stop" if live["capped"] else "pass", "detail": live["detail"]})
+            if live["capped"] and not outcome:
+                outcome, summary = "capped", live["detail"]
+        else:
+            steps.append({"step": "volume", "result": "unknown", "detail": live["detail"]})
+
+    if not outcome:
+        if ok is None:
+            outcome, summary = "unknown", "no rule removes it; whether it reaches the model depends on its level"
+        elif live is not None and not live["found"]:
+            outcome, summary = "not_found", "no rule removes it, but it was not among the lines collected for the model in the window"
+        else:
+            outcome, summary = "reaches_model", "no rule removes it: it reaches the model"
+    return {"text": text, "source": source, "steps": steps, "verdict": {"outcome": outcome, "summary": summary},
+            "must_keep": mk, "live": live}
+
+
+def _explain_live(known, raw, source, host, ident, tmpl):
+    """A sor helye az elo ablak modellnek gyujtott sorai kozott: megvan-e, hanyszor, es atjut-e a szakasz mintakorlatjan."""
+    sec, hf, idf = _SECTION_OF[source]
+    nt = norm_msg(tmpl)
+
+    def same(x):
+        if str(x.get(hf, "")).lower() != host.lower() or str(x.get(idf, "")).lower() != ident.lower():
+            return False
+        rm = norm_msg(x.get("_msg", ""))
+        return rm == nt or (len(nt) >= 12 and nt in rm)
+
+    rows = raw.get(sec, []) or []
+    kept = [x for x in rows if known.classify_row(row_text(x, hf, idf))[0] == "keep"]
+    hit = next((x for x in rows if same(x)), None)
+    if hit is None:
+        return {"found": False, "detail": "not among the lines collected for the model in the window (other level, other wording, or not logged)"}
+    hits = hit.get("hits")
+    timing_s = f", first {str(hit.get('first', ''))[:19]}, last {str(hit.get('last', ''))[:19]} UTC" if hit.get("last") else ""
+    base = {"found": True, "hits": hits, "first": hit.get("first"), "last": hit.get("last")}
+    if hit not in kept:
+        return dict(base, capped=False, detail=f"seen {hits}x in the window{timing_s}; removed by the pre-filter (see above)")
+    if source == "docker":
+        tot = {}
+        for x in kept:
+            k = (str(x.get(hf, "")).lower(), str(x.get(idf, "")).lower())
+            tot[k] = tot.get(k, 0) + _int(x.get("hits"))
+        order = sorted(tot, key=lambda k: -tot[k])
+        crank = order.index((host.lower(), ident.lower())) + 1
+        pats = sorted((x for x in kept if (str(x.get(hf, "")).lower(), str(x.get(idf, "")).lower()) == (host.lower(), ident.lower())),
+                      key=lambda x: -_int(x.get("hits")))
+        prank = next(i for i, x in enumerate(pats) if x is hit) + 1
+        mc, mp = DOCKER_CAP
+        if crank > mc:
+            return dict(base, capped=True, rank=crank, cap=mc, detail=f"seen {hits}x{timing_s}, but its container ranks {crank} by error-like lines: only the top {mc} containers reach the model")
+        if prank > mp:
+            return dict(base, capped=False, rank=prank, cap=mp, detail=f"seen {hits}x{timing_s}; the container is shown, but this pattern ranks {prank}: only the top {mp} patterns are quoted (it still counts in the container total)")
+        return dict(base, capped=False, rank=prank, cap=mp, detail=f"seen {hits}x{timing_s}; reaches the model (container rank {crank}, pattern rank {prank})")
+    rank = next(i for i, x in enumerate(kept) if x is hit) + 1
+    cap = SECTION_CAPS[sec]
+    if rank > cap:
+        return dict(base, capped=True, rank=rank, cap=cap, detail=f"seen {hits}x{timing_s}, but it ranks {rank} by count among the kept {source} patterns: only the top {cap} reach the model")
+    return dict(base, capped=False, rank=rank, cap=cap, detail=f"seen {hits}x{timing_s}; reaches the model (rank {rank} of the top {cap})")
+
+
+def _int(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_input(known, t_from, t_to, extra_lines=None, raw=None):

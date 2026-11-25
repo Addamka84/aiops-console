@@ -481,6 +481,48 @@ async function runTest() {
   S.diff = null;
   draw();
 }
+// "Why isn't it shown?": one log line's path into the model input (level -> noise -> snooze -> known issue -> volume cap)
+S.exp = { host: '', ident: '', message: '', source: 'syslog', level: '', hours: 24, res: null, error: '', busy: false };
+async function runExplain() {
+  const x = S.exp;
+  x.error = ''; x.busy = true; draw();
+  try {
+    x.res = await api('POST', '/api/v1/explain', { host: x.host, ident: x.ident, message: x.message, source: x.source,
+      level: x.source === 'docker' ? null : (x.level || null), hours: x.hours, content: draftOut() });
+  } catch (e) { x.res = null; x.error = e.message; }
+  x.busy = false; draw();
+}
+const EXP_OUTCOME = { suppressed: ['Removed by a noise rule', 'sev-medium'], snoozed: ['Snoozed', 'sev-medium'], known: ['Known issue', 'sev-medium'],
+  filtered: ['Filtered by level', 'sev-medium'], capped: ['Cut by the volume cap', 'sev-medium'], not_found: ['Not in the window', 'b-unknown'],
+  unknown: ['Depends on the level', 'b-unknown'], reaches_model: ['Reaches the model', 'b-up'] };
+const EXP_STEP = { level: 'Level filter', noise: 'Noise rules', snooze: 'Snoozes', known: 'Known issues', volume: 'Volume cap (live window)' };
+function explainPanel() {
+  const x = S.exp, r = x.res;
+  const inp = (k, ph, cls, extra) => h('input', Object.assign({ class: cls || '', placeholder: ph, value: x[k], oninput: (e) => { x[k] = e.target.value; },
+    onkeydown: (e) => { if (e.key === 'Enter' && x.message.trim()) runExplain(); } }, extra || {}));
+  const lvlHint = x.source === 'journald' ? 'PRIORITY 0-7' : 'level, e.g. err';
+  const out = r ? EXP_OUTCOME[r.verdict.outcome] || [r.verdict.outcome, 'b-unknown'] : null;
+  const mark = (res) => (res === 'stop' ? h('span', { class: 'badge b-down' }, 'stops here') : res === 'pass' ? h('span', { class: 'badge b-up' }, 'passes')
+    : h('span', { class: 'badge b-unknown' }, 'unknown'));
+  return h('div', { class: 'panel', id: 'explain-panel' },
+    h('h3', { style: 'margin-top:0' }, 'Why isn’t it shown?'),
+    h('p', { class: 'muted small' }, 'Paste a log line to see its path into the model input, in the order the service applies the rules. Uses your current (unsaved) edits; nothing is changed.'),
+    h('div', { class: 'row' },
+      h('select', { onchange: (e) => { x.source = e.target.value; draw(); } }, ['syslog', 'journald', 'docker'].map((s) => h('option', { value: s, selected: s === x.source }, s))),
+      inp('host', 'host'), inp('ident', x.source === 'docker' ? 'container' : 'ident / app'),
+      x.source === 'docker' ? null : inp('level', lvlHint, '', { style: 'width:130px' }),
+      h('select', { title: 'Live window for the volume check', onchange: (e) => { x.hours = Number(e.target.value); } },
+        [[0, 'rules only'], [6, '6 h'], [24, '24 h'], [72, '72 h']].map(([n, l]) => h('option', { value: n, selected: n === x.hours }, l)))),
+    h('div', { class: 'row', style: 'margin-top:6px' }, inp('message', 'the message, e.g. Failed to refresh device state for LED-12', 'grow mono'),
+      h('button', { class: 'btn primary', disabled: x.busy, onclick: () => { if (x.message.trim()) runExplain(); } }, x.busy ? 'Checking…' : 'Explain')),
+    x.error ? h('div', { class: 'err' }, x.error) : null,
+    r ? h('div', { style: 'margin-top:10px' },
+      h('p', {}, h('span', { class: 'badge ' + out[1] }, out[0]), ' ', r.verdict.summary),
+      h('div', { class: 'muted small mono', style: 'margin-bottom:6px' }, 'Matched as: ' + r.text),
+      h('table', {}, h('tbody', {}, r.steps.map((s) => h('tr', {},
+        h('td', { class: 'nowrap' }, EXP_STEP[s.step] || s.step), h('td', { class: 'nowrap' }, mark(s.result)), h('td', { class: 'small' }, s.detail))))),
+      r.must_keep ? h('p', { class: 'small' }, 'Listed under Never suppress: no noise rule or snooze may match it.') : null) : null);
+}
 async function showDiff() {
   try { S.diff = (await api('POST', '/api/v1/config/known/diff', { content: draftOut() })).diff; } catch (e) { toast(e.message, true); }
   draw();
@@ -601,6 +643,7 @@ function draw() {
   renderShell([
     h('h2', {}, 'Noise & known issues'),
     h('p', { class: 'muted' }, 'Rules run before the model sees the logs. Lines are matched as "host | ident | message" with numbers collapsed to <N>.'),
+    explainPanel(),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Lab context (facts given to the model)'), ctxRows,
       h('button', { class: 'btn', onclick: () => { d.context.push(''); draw(); } }, '+ Add fact')),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Noise rules (' + d.noise.length + ')'),
@@ -1193,8 +1236,8 @@ function drawIng() {
   const dirty = (() => { try { return JSON.stringify(JSON.parse(g.text || '{}')) !== JSON.stringify(g.base); } catch (e) { return true; } })();
   const effRows = Object.entries(g.eff || {}).map(([name, s]) => h('tr', {},
     h('td', { class: 'mono small nowrap' }, name, h('div', { class: 'muted' }, s.builtin ? 'built-in + overrides' : 'custom')),
-    h('td', {}, Object.entries(s.severity).map(([raw, lvl]) => h('span', { style: 'margin-right:10px;white-space:nowrap' },
-      h('span', { class: 'mono small' }, raw + ' → '), sevBadge(ingSev(lvl)), ' ', h('span', { class: 'small muted' }, lvl)))),
+    h('td', {}, h('div', { style: 'display:flex;flex-wrap:wrap;gap:4px 12px' }, Object.entries(s.severity).map(([raw, lvl]) => h('span', { style: 'white-space:nowrap' },
+      h('span', { class: 'mono small' }, raw + ' → '), sevBadge(ingSev(lvl)), ' ', h('span', { class: 'small muted' }, lvl))))),
     h('td', { class: 'small nowrap' }, 'unmapped → ', h('strong', {}, s.default)),
     h('td', { class: 'mono small muted' }, Object.entries(s.fields).map(([k, v]) => k + '=' + v).join(', ') || 'default field names')));
   const res = g.res ? h('span', {}, ' → ', sevBadge(ingSev(g.res.level)), ' ', h('strong', {}, g.res.level),
@@ -1221,7 +1264,8 @@ function drawIng() {
         h('button', { class: 'btn primary', onclick: ingTry }, 'Normalise'), res),
       h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Uses the document above (unsaved edits included); nothing is changed.')),
     h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Effective mapping (saved configuration)'),
-      h('table', {}, h('thead', {}, h('tr', {}, ['Tool', 'Raw value → level', 'Fallback', 'Field paths'].map((x) => h('th', {}, x)))), h('tbody', {}, effRows))),
+      h('div', { style: 'overflow-x:auto' },
+        h('table', {}, h('thead', {}, h('tr', {}, ['Tool', 'Raw value → level', 'Fallback', 'Field paths'].map((x) => h('th', {}, x)))), h('tbody', {}, effRows)))),
   ]);
 }
 
