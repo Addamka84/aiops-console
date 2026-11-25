@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.37"
+__version__ = "2.0.0-alpha.38"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1420,9 +1420,16 @@ def run_job(job, known, pool, dry_run=False):
     issues, stale_notes = guard_stale(issues, rows, t_to)
     guard_notes += stale_notes
     changed = changed or bool(stale_notes)
+    issues, res_notes = guard_resolved(issues, rows, raw.get("c") or [])
+    guard_notes += res_notes
+    changed = changed or bool(res_notes)
+    side, summary_in = [], out["summary"]
+    if job["kind"] == "incident":
+        issues, side, summary_in, focus_notes = guard_focus(issues, incident_anchors(job, evidence), summary_in)
+        guard_notes += focus_notes
     result = {
         "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
-        "summary": consistent_summary(out["summary"], issues, dropped, [ki["match_output"] for ki in known.issues],
+        "summary": consistent_summary(summary_in, issues, dropped, [ki["match_output"] for ki in known.issues],
                                       "== Known issues present" in user, changed and job["kind"] != "incident"), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
         "input_chars": len(user), "stats": stats, "ungrounded_hosts": ungrounded, "guard_notes": guard_notes,
@@ -1433,6 +1440,9 @@ def run_job(job, known, pool, dry_run=False):
         result["alert"] = redact(job.get("alert_text", ""))
         result["alert_key"] = job.get("key", "")
         result["alert_items"] = [redact(str(it.get("text", "")))[:300] for it in (job.get("items") or [])][:12]
+        if side:
+            result["side_issues"] = [{"title": cut(i.get("title", ""), 120), "severity": i.get("severity"), "hosts": i.get("hosts", [])}
+                                     for i in side]
         if job.get("correlation"):
             result["correlation"] = job["correlation"]
             result["correlated_alerts"] = len(job.get("items") or [])
@@ -1607,7 +1617,126 @@ def guard_stale(issues, rows, t_to, hours=STALE_H):
     return out, notes
 
 
-THIN_LINES = 5     # ennyi vagy kevesebb megtartott (nem zaj, nem ismert) naplosor az ablakban = vekony bizonyitek
+def guard_resolved(issues, rows, alerts=()):
+    """Lezart ('resolved') ugy sulyossaga (2026-11-25: a 'resolved' mentes-hiba 'medium' maradt): legfeljebb 'low'; ha egy nem-informacios
+    Kuma/riasztas esemeny alatamasztja (a hosztja vagy az azonositoja szerepel benne: valodi, mar helyreallt kieses), legfeljebb 'medium'.
+    Hatrany: egy lezart, de utohatassal jaro hiba (pl. adatvesztes) is csak low/medium. -> (ugyek, megjegyzesek)"""
+    alert_txt = " ".join(str(a.get("_msg", "")) for a in alerts if severe_event(a)).lower()
+    out, notes = [], []
+    for i in issues:
+        sev = i.get("severity", "info")
+        if i.get("status") != "resolved" or sev not in SEVERITIES:
+            out.append(i)
+            continue
+        keys = {str(h).lower() for h in i.get("hosts", []) if len(str(h)) >= 3} | {r[1] for r in _issue_rows(i, rows)}
+        title_w = {w for w in _focus_tokens(i.get("title", "")) if len(w) >= 4 and not w.isdigit() and w not in _FOCUS_STOP}
+        hit = alert_txt and (any(k in alert_txt for k in keys) or title_w & _focus_tokens(alert_txt))
+        cap = "medium" if hit else "low"
+        if SEVERITIES.index(sev) > SEVERITIES.index(cap):
+            i = dict(i, severity=cap)
+            notes.append(f"'{cut(i.get('title', ''), 60)}': resolved, severity {sev} -> {cap}")
+        out.append(i)
+    return out, notes
+
+
+_FOCUS_STOP = {"firing", "detector", "error", "errors", "records", "record", "minutes", "minute", "lines", "line", "matching", "threshold",
+               "last", "count", "hiba", "kritikus", "journal", "sor", "uptime", "kuma", "allt", "down", "critical", "warning", "alert",
+               "monitor", "failed", "check", "self", "ellenorzese", "csere", "mentes", "related", "grouped", "into", "this", "incident",
+               "with", "from", "more", "than", "alerts", "inthe", "inthelast"} | GENERIC_TERMS
+_FOCUS_TOK = re.compile(r"[a-z0-9][a-z0-9._-]*")
+
+
+def _focus_tokens(text):
+    """Szovegbol osszevetheto tokenek: a szavak, kotojel/pont/alahuzas menten a reszeik is, es a szomszedos 2-3 szo osszevonva
+    ('Home Assistant' -> 'homeassistant'). A reszszo-egyezes (homesrv ~ homesrv3) igy nem talalat."""
+    words = _FOCUS_TOK.findall(str(text).lower())
+    out = set()
+    for w in words:
+        w = w.strip("._-")
+        if w:
+            out.add(w)
+            out.update(p for p in re.split(r"[._-]+", w) if p)
+    flat = [re.sub(r"[._-]+", "", w) for w in words]
+    for n in (2, 3):
+        out.update("".join(flat[k:k + n]) for k in range(len(flat) - n + 1))
+    return out
+
+
+def _camel(name):
+    return " ".join(re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+", str(name)))
+
+
+def incident_anchors(job, evidence=None):
+    """Az incidenshez tartozo nevek: a riasztasok cimkeinek ertekei (host, azonosito, monitor), a detektor csoportja, a bizonyito sorok
+    hosztja es azonositoja, a topologia altal felismert eszkozok, a korrelacio eszkozei, es a riasztas szovegenek / nevenek szavai
+    (CamelCase szetbontva, osszevonasokkal). Altalanos szavak (error, firing, home, ...) nelkul. -> halmaz (kisbetus)"""
+    items = job.get("items") or [job]
+    texts, vals = [], []
+    for it in items:
+        texts.append(re.sub(r"^\s*\[[A-Z]+\]\s*\S+\s*(x\d+)?", " ", str(it.get("text", ""))))
+        for lab in it.get("alert_labels") or []:
+            for k, v in lab.items():
+                if k == "alertname":
+                    texts.append(_camel(v))
+                elif k != "severity":
+                    vals.append(str(v))
+        det = it.get("detector") or {}
+        vals += [str(v) for v in (det.get("group") or {}).values()]
+    for line in (evidence or {}).get("kept") or []:
+        vals += [p.strip() for p in str(line).split("|")[:2]]
+    corr = job.get("correlation") or {}
+    vals += [str(c) for c in corr.get("cis") or []] + ([str(corr["root"])] if corr.get("root") else [])
+    if TOPOLOGY:
+        try:
+            import correlation
+            cis = [str(c) for c in correlation.resolve_cis(TOPOLOGY, texts + vals)] + [str(c) for c in corr.get("cis") or []]
+            vals += cis
+            for c in cis:                          # a fuggok (needed by) is a riasztashoz tartoznak: egy NAS-kieses a rajta fuggo szolgaltatast is erinti
+                vals += [str(d) for d in correlation.topo_down(TOPOLOGY, c)][:40]
+        except Exception:  # noqa: BLE001 - a fokusz csak szukit; hiba eseten a nevek nelkul megy tovabb
+            pass
+    anchors = {v.strip().lower() for v in vals if len(v.strip()) >= 3}
+    for t in texts:
+        anchors |= {w for w in _focus_tokens(t) if len(w) >= 4 and not w.isdigit() and w not in _FOCUS_STOP}
+    return {a for a in anchors if a not in _FOCUS_STOP}
+
+
+def guard_focus(issues, anchors, summary=""):
+    """Incidens-fokusz (2026-11-25: a HomeAssistantErrors-incidensbe a homenas2 RomM-adatbazis I/O-sora is bekerult): az incidens csak a
+    riasztashoz kapcsolodo ugyeket jelenti. Kapcsolodo, ha a cime / bizonyiteka / hosztjai valamelyik horgony-nevet (incident_anchors)
+    tartalmazzak. A nem kapcsolodo, legfeljebb 'medium' ugy kikerul (a napi osszefoglalo ugyis jelzi); a 'high'/'critical' marad.
+    Ha nincs horgony, vagy egyik ugy sem kapcsolodik, minden valtozatlan (nem dontheto el). Az osszefoglalobol a kivett ugyeket emlito
+    mondatok kikerulnek. Hatrany: a riasztastol fuggetlen, kozepes problema csak a kovetkezo napi osszefoglaloban latszik.
+    -> (ugyek, kivett ugyek, osszefoglalo, megjegyzesek)"""
+    if not anchors or not issues:
+        return issues, [], summary, []
+    rel = []
+    for i in issues:
+        toks = _focus_tokens(" ".join([str(i.get("title", "")), str(i.get("evidence", ""))] + [str(h) for h in i.get("hosts", [])]))
+        hosts = {str(h).lower() for h in i.get("hosts", [])}
+        rel.append(bool(anchors & toks) or bool(anchors & hosts))
+    if not any(rel):
+        log("fokusz: egyik ugy sem nevezi meg a riasztas hosztjat / szolgaltatasat, valtozatlan", key="guard_focus")
+        return issues, [], summary, []
+    kept, side = [], []
+    for i, r in zip(issues, rel):
+        hi = i.get("severity") in SEVERITIES and SEVERITIES.index(i["severity"]) > SEVERITIES.index("medium")
+        (kept if r or hi else side).append(i)
+    if not side:
+        return issues, [], summary, []
+    kept_toks = set().union(*(_focus_tokens(" ".join(str(i.get(k, "")) for k in ("title", "evidence"))) for i in kept)) if kept else set()
+    marks = set()
+    for i in side:
+        marks |= {w for w in _focus_tokens(str(i.get("title", ""))) if len(w) >= 4 and w not in _FOCUS_STOP and w not in kept_toks}
+        marks |= {str(h).lower() for h in i.get("hosts", []) if str(h).lower() not in anchors}
+    sents = re.split(r"(?<=[.!?])\s+", str(summary or "").strip())
+    keep_s = [s for s in sents if not (marks & _focus_tokens(s))]
+    new_summary = " ".join(keep_s) if keep_s and len(keep_s) < len(sents) else summary
+    titles = ", ".join(f"'{cut(i.get('title', ''), 50)}'" for i in side[:3])
+    return kept, side, new_summary, [f"focus: {len(side)} issue(s) unrelated to the alert left to the daily digest ({titles})"]
+
+
+THIN_LINES = 5    # ennyi vagy kevesebb megtartott (nem zaj, nem ismert) naplosor az ablakban = vekony bizonyitek
 
 
 SILENCE_ALERTS = {"SyslogSourceSilent", "DockerLogsSilent", "JournaldSilent"}   # naplo-elhallgatas riasztasok: a sorok nem a riasztasrol szolnak
@@ -1740,6 +1869,8 @@ def to_events(result):
         head["alert"] = result.get("alert", "")
         if result.get("alert_items"):
             head["alert_items"] = json.dumps(result["alert_items"], ensure_ascii=False)
+        if result.get("side_issues"):
+            head["side_issues"] = json.dumps(result["side_issues"], ensure_ascii=False)
         if result.get("correlation"):
             c = result["correlation"]
             head["correlated_alerts"] = str(result.get("correlated_alerts", 1))

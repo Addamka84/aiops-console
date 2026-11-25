@@ -264,6 +264,8 @@ function incDetailEl(d) {
     d.alert_items.length ? h('details', {}, h('summary', { class: 'small' }, 'Grouped alerts (' + d.alert_items.length + ')'),
       h('ul', { class: 'small mono' }, d.alert_items.map((t) => h('li', {}, t)))) : h('p', { class: 'small mono muted' }, d.alert),
     issueList(d.issues),
+    (d.side_issues || []).length ? h('details', {}, h('summary', { class: 'small' }, 'Unrelated to the alert, left to the daily digest (' + d.side_issues.length + ')'),
+      h('ul', { class: 'small' }, d.side_issues.map((s) => h('li', {}, sevBadge(s.severity || 'info'), ' ' + s.title + ((s.hosts || []).length ? ' (' + s.hosts.join(', ') + ')' : ''))))) : null,
     d.guard_notes.length ? h('div', { class: 'note small' }, 'Guards changed the model output: ' + d.guard_notes.join('; ')) : null,
     h('h3', {}, 'Timeline'), incTimeline(d),
     actions);

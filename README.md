@@ -297,3 +297,9 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Trade-off:** a real, unrelated failure on a covered device during the window is only logged, too. Keep windows short and targeted; the logged alerts stay in VictoriaLogs.
 
 ![Maintenance](docs/screenshots/maintenance.png)
+
+### Incident focus and resolved-issue severity (v2.0.0-alpha.38)
+- **Incidents stay on the alert:** an incident now reports only the issues connected to the alert: an issue is connected when its title, evidence or hosts name something the alert names (label values, the detector's group, the hosts and services of the evidence lines, the devices the topology recognises and everything that depends on them). Unrelated issues up to `medium` move out of the incident and are listed under "Unrelated to the alert, left to the daily digest"; sentences about them are removed from the summary. Unrelated `high`/`critical` issues stay. If no issue names the alert, nothing changes.
+- **Resolved means at most low:** an issue the model marks `resolved` is capped at `low`, or at `medium` when a Kuma "down" or a critical/high alert names its host or service (a real outage that has recovered). Applies to digests and incidents.
+- **Why:** an alert about Home Assistant errors also reported an unrelated database warning on the NAS, and a resolved backup failure stayed `medium` in the digest. Replayed on a week of real incidents, 19 of 78 issues would have moved to the digest (mostly unrelated device and add-on warnings).
+- **Trade-off:** an unrelated `medium` problem found during an incident only shows up in the next daily digest; a resolved failure with lasting damage (e.g. lost data) is also capped at `low`/`medium`.

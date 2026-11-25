@@ -818,7 +818,12 @@ def create_app(rt, tokens=None):
             stats = json.loads(hd.get("stats") or "{}")
         except ValueError:
             stats = {}
-        v.update(issues=issues, alert_items=items if isinstance(items, list) else [], window=hd.get("window", ""), model=hd.get("model", ""),
+        try:
+            side = json.loads(hd.get("side_issues") or "[]")
+        except ValueError:
+            side = []
+        v.update(issues=issues, alert_items=items if isinstance(items, list) else [],
+                 side_issues=[s for s in side if isinstance(s, dict)] if isinstance(side, list) else [], window=hd.get("window", ""), model=hd.get("model", ""),
                  endpoint=hd.get("endpoint", ""), secs=hd.get("secs"), guard_notes=[x for x in str(hd.get("guard_notes", "")).split(" | ") if x],
                  ungrounded_hosts=int(hd.get("ungrounded_hosts") or 0), dropped_known=int(hd.get("dropped_known") or 0), stats=stats,
                  events=store.inc_events(inc))

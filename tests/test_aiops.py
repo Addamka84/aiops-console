@@ -341,7 +341,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(head["kind"], "digest")
         self.assertEqual(head["issue_count"], "1")  # az ismert (sdb) utoszurve
         self.assertEqual(head["dropped_known"], "1")
-        self.assertEqual(head["max_severity"], "high")
+        self.assertEqual(head["max_severity"], "low")   # alpha.38: 'resolved' ugy legfeljebb low (a Kuma-esemeny nem nevezi meg a homesrv-et)
         self.assertEqual(inserts[1]["kind"], "issue")
         self.assertEqual(inserts[1]["parent"], head["id"])
         # a modell bemenete: zaj kiszurve, ismert ugy jelolve, az NFS megmaradt
