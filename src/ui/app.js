@@ -696,7 +696,8 @@ function draw() {
         h('button', { class: 'icon', title: 'Remove', onclick: () => { d.known_issues.splice(i, 1); touched(); draw(); } }, '×')),
       f('id', 'ID (unique)', true), f('note', 'Note (shown to the model as "already acknowledged")', false, 2),
       f('match', 'Input regex: log line "host | ident | message" that marks this issue', true),
-      f('match_output', 'Output regex (optional): drops model issues whose title/evidence matches; defaults to the input regex', true));
+      f('match_output', 'Output regex (optional): drops model issues whose title/evidence matches; defaults to the input regex', true),
+      f('match_alert', 'Alert regex (optional): a firing alert whose text matches is only logged, opens no incident and joins no correlation; name the host and the device', true));
   });
 
   const mkRows = d.must_keep.map((m, i) => {

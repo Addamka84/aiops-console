@@ -70,11 +70,20 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(info["suspected_dependency"]["ci"], "homenas2")      # the non-hub shared dependency, not the hub router
 
     def test_describe_marks_the_root_as_a_hypothesis(self):
-        info = correlation.analyze(self.t, [item("n", "n", ["homenas2"]), item("p", "p", ["homesrv3"])])
+        info = correlation.analyze(self.t, [item("n", "n", ["homenas2"]), item("p", "p", ["homesrv3"]), item("s", "s", ["homesrv"])])
         text = "\n".join(correlation.describe(self.t, info))
         self.assertIn("HYPOTHESIS", text)
         self.assertIn("homenas2", text)
         self.assertEqual(correlation.describe(self.t, {"root": None}), [])
+
+    def test_no_root_hypothesis_with_a_single_dependent(self):
+        """2026-11-25: a NAS SMART alert and an unrelated PulseAudio error on a dependent host became 'root homenas2, confidence 1.0'."""
+        info = correlation.analyze(self.t, [item("smart", "DiskSmartFailed homenas2", ["homenas2"]), item("pa", "pulseaudio", ["homesrv3"])])
+        self.assertIsNone(info["root"])
+        self.assertEqual(info["confidence"], 0.0)
+        self.assertEqual(correlation.describe(self.t, info), [])
+        single = correlation.analyze(self.t, [item("x", "x", ["homesrv3"])])
+        self.assertIsNone(single["root"])
 
 
 class WiringTests(unittest.TestCase):
@@ -208,7 +217,8 @@ class RunJobInputTests(unittest.TestCase):
             def mark_down(self, ep, why):
                 pass
         t = topology.Topology(DOC)
-        items = [item("n", "NFS server 192.0.2.172 not responding", ["homenas2"], 0), item("p", "plex errors", ["homesrv3"], 0)]
+        items = [item("n", "NFS server 192.0.2.172 not responding", ["homenas2"], 0), item("p", "plex errors", ["homesrv3"], 0),
+                 item("s", "homesrv nfs stale", ["homesrv"], 0)]
         corr = correlation.analyze(t, items)
         job = {"kind": "incident", "key": "k", "alert_text": "NFS server 192.0.2.172 not responding", "alert_labels": [], "correlation": corr,
                "items": [{"text": i["text"], "alert_labels": [], "detector": None} for i in items],
@@ -219,12 +229,12 @@ class RunJobInputTests(unittest.TestCase):
             (aiops.TOPOLOGY, aiops.collect, aiops.review_stats, aiops.ollama_chat, aiops.vl_query, aiops.vl_insert, aiops.build_input) = saved
         self.assertEqual(res, "done")
         text = "\n".join(seen["extra"])
-        self.assertIn("Related alerts grouped into this incident (1 more)", text)
+        self.assertIn("Related alerts grouped into this incident (2 more)", text)
         self.assertIn("Root-cause HYPOTHESIS", text)
         self.assertIn("ONE incident", seen["system"])
         self.assertEqual(aiops.STATUS["last_incident"]["issues"][0]["hosts"], ["homenas2"])     # the invented host was removed
         self.assertEqual(aiops.STATUS["last_incident"]["ungrounded_hosts"], 1)
-        self.assertEqual(aiops.STATUS["last_incident"]["correlated_alerts"], 2)
+        self.assertEqual(aiops.STATUS["last_incident"]["correlated_alerts"], 3)
 
 
 if __name__ == "__main__":

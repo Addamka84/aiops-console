@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.35"
+__version__ = "2.0.0-alpha.36"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -361,9 +361,9 @@ def validate_known(d):
                 seen.add(kid)
             if not isinstance(k.get("note"), str) or not k.get("note", "").strip():
                 errs.append(f"known_issues[{i}]: 'note' is required")
-            for field in ("match", "match_output"):
+            for field in ("match", "match_output", "match_alert"):
                 v = k.get(field)
-                if v is None and field == "match_output":
+                if v is None and field in ("match_output", "match_alert"):
                     continue
                 if not isinstance(v, str) or not v:
                     errs.append(f"known_issues[{i}]: '{field}' must be a non-empty regex string")
@@ -406,7 +406,7 @@ def validate_known(d):
                 errs.append(f"snoozes[{i}]: 'note' must be a string")
     if not errs:   # katasztrofalis visszalepes (ReDoS) elleni proba: a regexek kulon alfolyamatban, idokorlattal (regex_guard.py)
         rxs = [x for x in d.get("noise", []) if isinstance(x, str)]
-        rxs += [v for k in d.get("known_issues", []) for v in (k.get("match"), k.get("match_output")) if isinstance(v, str)]
+        rxs += [v for k in d.get("known_issues", []) for v in (k.get("match"), k.get("match_output"), k.get("match_alert")) if isinstance(v, str)]
         rxs += [x["regex"] for x in d.get("snoozes", []) if isinstance(x.get("regex"), str)]
         bad = regex_guard.check(rxs)
         if bad:
@@ -420,6 +420,10 @@ def validate_known(d):
                     gen = [c for c in GENERIC_CANARIES if re.search(k["match"], c, re.I)]
                     if gen:
                         errs.append(f"known_issues[{i}].match: too broad, it matches generic text ({gen[0]!r}); name the host / unit / device")
+                if isinstance(k, dict) and isinstance(k.get("match_alert"), str):
+                    gen = [c for c in GENERIC_ALERT_CANARIES if re.search(k["match_alert"], c, re.I)]
+                    if gen:
+                        errs.append(f"known_issues[{i}].match_alert: too broad, it matches a generic alert ({gen[0]!r}); name the host and the device")
             pairs = [(f"noise[{i}]", x) for i, x in enumerate(d.get("noise", []))] + [(f"snoozes[{i}]", s["regex"]) for i, s in enumerate(d.get("snoozes", []))]
             for label, rx in pairs:
                 hit = must_keep_conflict(rx, d.get("must_keep", []))
@@ -452,6 +456,13 @@ GENERIC_CANARIES = ("ERROR: something failed", "x", "a b c 1 2 3", "kernel: Out 
                     "systemd[1]: app.service: Failed with result 'exit-code'.")
 
 
+# Altalanos riasztas-szovegek: egy ismert ugy 'match_alert' regexe nem illeszkedhet rajuk (akkor az osszes ilyen riasztast elnyelne)
+GENERIC_ALERT_CANARIES = ("[FIRING] DiskSmartFailed x1 Lemez SMART hiba (FAILED self-check): somehost / ata-DISK_MODEL_SERIAL",
+                          "[FIRING] HostRebooted x1 somehost rebooted", "[FIRING] KumaMonitorDown x1 Uptime Kuma: some service DOWN",
+                          "[FIRING] JournaldCritical x1 Hiba/kritikus journal-sor: somehost / someunit (1 db)",
+                          "[FIRING] NFSServerNotResponding x1 NFS server somehost not responding", "x")
+
+
 def parse_until(v):
     """'2026-01-31T12:00:00Z' -> datetime (naiv UTC) | None ha ervenytelen."""
     if not isinstance(v, str):
@@ -480,7 +491,15 @@ class Known:
                 "id": k["id"], "note": k["note"],
                 "match": re.compile(k["match"]),
                 "match_output": re.compile(k.get("match_output", k["match"]), re.I),
+                "match_alert": re.compile(k["match_alert"], re.I) if k.get("match_alert") else None,
             })
+
+    def alert_issue(self, text):
+        """Egy riasztas szovegere illeszkedo ismert ugy (csak a kifejezett 'match_alert' regex szamit) vagy None."""
+        for ki in self.issues:
+            if ki["match_alert"] is not None and ki["match_alert"].search(str(text or "")):
+                return ki
+        return None
 
     def classify_idx(self, text, now=None):
         """-> ('noise', index) | ('snooze', snooze_dict) | ('known', issue_dict) | ('keep', None)"""
@@ -1795,7 +1814,7 @@ def iso_us(t):
     return t.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def poll_incidents(state, now):
+def poll_incidents(state, now, known=None):
     """Uj 'firing' riasztasok keresese a tarban; incidens-munkak letrehozasa (korlatozva, deduplikalva).
 
     FONTOS (hiba volt): a '_time:>T' szuro T-nel nagyobb esemenyt ad vissza; ha T masodperc-pontossagu, az azonos masodpercbeli
@@ -1825,6 +1844,11 @@ def poll_incidents(state, now):
         if alerts_log_only(r.get("alerts", "")):             # 'notify: none' szabaly: a riasztas mar a tarban van (appname:alert), triazs nincs
             STATUS["log_only_alerts"] = STATUS.get("log_only_alerts", 0) + 1
             log(f"riasztas csak naplozva (notify: none): {key}", key=("log_only", key))
+            continue
+        ki = known.alert_issue(r.get("_msg", "")) if known is not None else None
+        if ki is not None:                                    # ismert ugy (match_alert): nincs incidens, es a korrelacioba sem kerul be
+            STATUS["known_issue_alerts"] = STATUS.get("known_issue_alerts", 0) + 1
+            log(f"riasztas ismert ugy ({ki['id']}): csak naplozva, nincs incidens: {key}", key=("known_alert", key))
             continue
         firings = note_firing(state, key)                     # minden tuzeles szamit (a 30 perces szuneteltetes alatt is): ebbol latszik a flapping
         last_seen = state["recent_alert_keys"].get(key, 0)   # (nem 'last': az az utolso esemeny ideje, kulon valtozo kell)
@@ -2061,7 +2085,7 @@ def service_loop(get_known, store=None):
             schedule_digest(state, now)
             if time.monotonic() - last_poll >= CFG["INCIDENT_POLL_S"]:
                 last_poll = time.monotonic()
-                poll_incidents(state, now)
+                poll_incidents(state, now, known)
             poll_detectors(state, now)
             flush_alerts(state, now)
             expire_jobs(state)

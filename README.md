@@ -281,3 +281,8 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Fix:** "Why isn't it shown?" no longer calls a line "too rare" when the typed text differs slightly from the logged one (e.g. a device name); it uses the closest collected pattern and says so.
 
 ![Incidents](docs/screenshots/incidents.png)
+
+### Known-issue alerts and a stricter root-cause hypothesis (v2.0.0-alpha.36)
+- **Known-issue alerts:** a known issue can now carry an optional `match_alert` regex. A firing alert whose text matches it is only logged: it opens no incident and does not join the correlation. Without `match_alert` nothing changes (the input and output regexes are written for log lines and model text, and are too broad for alert text). A `match_alert` that matches a generic alert (e.g. any `DiskSmartFailed`) is rejected: it has to name the host and the device.
+- **Root-cause hypothesis only with support:** the correlator names a root cause only when it explains at least two *dependent* alerting assets. Before, two alerts that arrived together were enough: a known SMART alert on a NAS became the "root cause, confidence 1.0" of an unrelated audio error on a host that mounts the NAS. The alerts are still grouped; they just get no hypothesis. Storms are unaffected (synthetic eval: root cause 8/8 before and after).
+- **Trade-off:** a real "one host failed and one dependent service alerts" case also gets no hypothesis now; and while a known issue's `match_alert` is set, a new, worse failure that raises the same alert text opens no incident either.

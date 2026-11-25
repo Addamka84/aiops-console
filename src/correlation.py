@@ -13,6 +13,7 @@ from collections import defaultdict
 
 DEPTH = 3
 JOIN_TH = 0.55
+MIN_ROOT_DEPS = 2      # gyokerok-hipotezis csak akkor, ha legalabb ennyi FUGGO eszkoz riasztasat magyarazza
 
 
 def _hub(topo, ci, hub_fanout):
@@ -200,9 +201,11 @@ def analyze(topo, items, hub_fanout=25):
         return 1 + sum(1 for d in topo_down(topo, c) if d in cset)
     ranked = sorted(tops, key=lambda c: (-explained(c), -count[c], first[c], c))
     root = ranked[0]
-    info["root"] = root
-    info["confidence"] = round(explained(root) / len(cis), 2)
-    info["alternatives"] = ranked[1:4]
+    if explained(root) - 1 >= MIN_ROOT_DEPS:
+        info["root"] = root
+        info["confidence"] = round(explained(root) / len(cis), 2)
+        info["alternatives"] = [c for c in ranked[1:4] if explained(c) - 1 >= MIN_ROOT_DEPS]
+    # kevesebb fuggo eszkoz: nincs gyokerok-hipotezis (2026-11-25: egy egyideju, ismert NAS-riasztas lett egy PulseAudio-hiba "gyokere", 1.0-s bizalommal)
     if info["confidence"] < 0.8 and len(tops) >= 2:
         counts = defaultdict(int)
         for t in tops:
@@ -213,7 +216,7 @@ def analyze(topo, items, hub_fanout=25):
             best, cover = max(counts.items(), key=lambda kv: (kv[1], -len(topo_down(topo, kv[0], 2))))
             if cover >= 2:
                 info["suspected_dependency"] = {"ci": best, "explains": cover, "of": len(tops)}
-    info["impacted"] = len(set(topo_down(topo, root)) | cset)
+    info["impacted"] = len(set(topo_down(topo, info["root"])) | cset) if info["root"] else len(cset)
     return info
 
 
