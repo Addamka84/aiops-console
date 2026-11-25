@@ -80,7 +80,7 @@ const isAdmin = () => S.role === 'admin';
 // ---------------------------------------------------------------- shell
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
 const TABS = [['status', 'Status', 'Monitor'], ['incidents', 'Incidents', 'Monitor'], ['history', 'History', 'Monitor'],
-  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['rules', 'Alert rules', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['settings', 'Settings', 'Configure'],
+  ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['rules', 'Alert rules', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['maintenance', 'Maintenance', 'Configure'], ['settings', 'Settings', 'Configure'],
   ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
@@ -136,7 +136,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, incidents: pageIncidents, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, incidents: pageIncidents, maintenance: pageMaint, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -295,6 +295,62 @@ function drawInc() {
         h('span', { class: 'muted small' }, (x.list || []).length + ' incident(s)')),
       rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Time', 'Severity', 'Incident', 'Alerts', 'State', 'Feedback'].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
         : h('p', { class: 'muted' }, 'No incidents in this view.')),
+  ]);
+}
+
+// ---------------------------------------------------------------- maintenance windows (alerts on the targets are only logged)
+S.mw = { data: null, error: '', targets: '', hours: 2, start: '', deps: true, note: '', assets: [] };
+const MW_STATE_CLS = { active: 'b-pending', upcoming: 'b-ok', ended: 'b-unknown' };
+async function pageMaint() {
+  const x = S.mw;
+  try {
+    const [d, topo] = await Promise.all([api('GET', '/api/v1/maintenance'), api('GET', '/api/v1/config/topology')]);
+    x.data = d; x.assets = ((topo.content || {}).assets || []).map((a) => a.id); x.error = '';
+  } catch (e) { x.error = e.message; }
+  drawMaint();
+}
+async function mwAdd() {
+  const x = S.mw;
+  const targets = x.targets.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  if (!targets.length) { toast('Give at least one device', true); return; }
+  const body = { targets, hours: Number(x.hours), include_dependents: x.deps, note: x.note };
+  if (x.start.trim()) body.start = x.start.trim();
+  try { await api('POST', '/api/v1/maintenance', body); toast('Maintenance window saved'); x.targets = ''; x.note = ''; x.start = ''; } catch (e) { toast(e.message, true); }
+  pageMaint();
+}
+async function mwEnd(id) {
+  try { await api('POST', '/api/v1/maintenance/' + encodeURIComponent(id) + '/end'); toast('Window ended'); } catch (e) { toast(e.message, true); }
+  pageMaint();
+}
+function drawMaint() {
+  const x = S.mw, d = x.data;
+  const rows = d ? d.windows.slice().sort((a, b) => (a.state === b.state ? (a.start < b.start ? 1 : -1) : ['active', 'upcoming', 'ended'].indexOf(a.state) - ['active', 'upcoming', 'ended'].indexOf(b.state)))
+    .map((w) => h('tr', {},
+      h('td', {}, h('span', { class: 'badge ' + (MW_STATE_CLS[w.state] || 'b-unknown') }, w.state), w.state === 'active' ? h('div', { class: 'muted small' }, fmtLeft(w.remaining_s)) : null),
+      h('td', {}, h('strong', {}, w.targets.join(', ')), w.include_dependents ? h('div', { class: 'muted small' }, 'covers ' + w.covers.length + ': ' + w.covers.join(', ')) : null,
+        w.note ? h('div', { class: 'small' }, w.note) : null),
+      h('td', { class: 'small nowrap' }, fmtTime(w.start), h('div', {}, '→ ' + fmtTime(w.end))),
+      h('td', {}, isAdmin() && w.state !== 'ended' ? h('button', { class: 'btn small', onclick: () => mwEnd(w.id) }, w.state === 'active' ? 'End now' : 'Cancel') : null))) : [];
+  renderShell([
+    h('h2', {}, 'Maintenance'),
+    h('p', { class: 'muted' }, 'During a planned change (hardware swap, stack redeploy, update), alerts and detector hits on the targets are only logged: no incident, no correlation. With "include dependents" the devices that depend on a target in the topology are covered too.'),
+    x.error ? h('div', { class: 'err' }, x.error) : null,
+    d ? h('p', { class: 'small muted' }, 'Revision #' + d.rev + ' · ' + d.suppressed + ' alert(s) logged only because of a window since the service started') : null,
+    isAdmin() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New window'),
+      h('div', { class: 'row' },
+        h('input', { class: 'grow', list: 'mw-assets', placeholder: 'devices, e.g. homesrv (comma separated)', value: x.targets, oninput: (e) => { x.targets = e.target.value; } }),
+        h('datalist', { id: 'mw-assets' }, x.assets.map((a) => h('option', { value: a }))),
+        h('select', { onchange: (e) => { x.hours = Number(e.target.value); } },
+          [[0.5, '30 min'], [1, '1 h'], [2, '2 h'], [4, '4 h'], [8, '8 h'], [24, '1 day'], [72, '3 days']].map(([v, l]) => h('option', { value: v, selected: v === x.hours }, l))),
+        h('input', { placeholder: 'start (UTC, empty = now)', style: 'width:220px', value: x.start, oninput: (e) => { x.start = e.target.value; } })),
+      h('div', { class: 'row', style: 'margin-top:6px' },
+        h('label', { class: 'small' }, h('input', { type: 'checkbox', checked: x.deps, onchange: (e) => { x.deps = e.target.checked; } }), ' include dependents'),
+        h('input', { class: 'grow', placeholder: 'note: what is being done', value: x.note, oninput: (e) => { x.note = e.target.value; } }),
+        h('button', { class: 'btn primary', onclick: mwAdd }, 'Start window')),
+      h('p', { class: 'muted small' }, 'Start format: 2026-11-25T18:00:00Z. A window lasts at most 7 days; ended windows are kept for 7 days. Read-only token: propose the "maintenance" document on the Proposals page instead.'))
+      : h('p', { class: 'muted small' }, 'Admin token required to start or end a window.'),
+    h('div', { class: 'panel' }, rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['State', 'Targets', 'Time', ''].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
+      : h('p', { class: 'muted' }, 'No maintenance windows.')),
   ]);
 }
 
@@ -491,7 +547,11 @@ async function pageStatus() {
     try { await fn(); } catch (e) { toast(e.message, true); }
     busy.v = false; ev.target.disabled = false;
   };
+  const mw = s.maintenance_active || [];
   renderShell([
+    mw.length ? h('div', { class: 'note' }, h('strong', {}, 'Maintenance window active: '),
+      mw.map((w) => w.targets.join(', ') + ' until ' + fmtTime(w.end) + (w.note ? ' (' + w.note + ')' : '')).join('; '),
+      ' · alerts on these devices are only logged. ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('maintenance'); } }, 'Manage')) : null,
     h('div', { class: 'grid' },
       h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'LLM endpoints'),
         (s.endpoints && s.endpoints.length ? s.endpoints : [{ url: '(not probed yet)', state: 'unknown' }]).map((e) => h('div', { class: 'row' },
@@ -1298,7 +1358,7 @@ async function pageHistory() {
   renderShell([
     h('h2', {}, 'History'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, h('span', { class: 'muted' }, 'Document'),
-      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'rules', 'ingest', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
+      h('select', { onchange: (e) => { S.historyKey = e.target.value; render(); } }, ['known', 'topology', 'detectors', 'rules', 'ingest', 'maintenance', 'settings'].map((k) => h('option', { value: k, selected: k === key }, k)))),
     h('div', { class: 'panel' }, h('table', {}, h('thead', {}, h('tr', {}, ['Revision', 'When', 'Who', 'Comment', ''].map((x) => h('th', {}, x)))), h('tbody', {}, revs.map(revRow)))),
     audit ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Audit log'),
       h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Who', 'Action', 'Detail'].map((x) => h('th', {}, x)))),

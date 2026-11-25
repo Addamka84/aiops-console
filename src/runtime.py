@@ -17,10 +17,11 @@ import ingest
 import rules
 import rulesync
 import settings
+import maintenance
 import topology
 
 DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults", "known.default.json")
-KEYS = ("known", "settings", "topology", "detectors", "ingest", "rules")
+KEYS = ("known", "settings", "topology", "detectors", "ingest", "rules", "maintenance")
 
 
 class DocError(Exception):
@@ -58,6 +59,11 @@ def validate_doc(key, content):
         return content
     if key == "rules":
         errs = rules.validate(content)
+        if errs:
+            raise DocError(errs)
+        return content
+    if key == "maintenance":
+        errs = maintenance.validate(content, aiops.TOPOLOGY)
         if errs:
             raise DocError(errs)
         return content
@@ -170,6 +176,7 @@ class Runtime:
         self._topo_rev = -1
         self._det_rev = -1
         self._ing_rev = -1
+        self._maint_rev = -1
         self._rules_rev = -1
         self._raw = {}  # hours -> (monotonic, raw)  (a regex-teszt gyorsitotara)
 
@@ -224,6 +231,11 @@ class Runtime:
                 cur = self.store.current("ingest")
                 ingest.set_active(cur["content"] if cur else {})
                 self._ing_rev = iid
+            mid = self.store.revision_id("maintenance")
+            if mid != self._maint_rev:
+                cur = self.store.current("maintenance")
+                maintenance.set_active(cur["content"] if cur else {})
+                self._maint_rev = mid
             kid = self.store.revision_id("known")
             if kid != self._known_rev:
                 cur = self.store.current("known")

@@ -6,6 +6,7 @@ Szerepkorok (Bearer token, kornyezeti valtozokbol; a tokenek nem kerulnek konfig
 Token nelkul (egyik sincs beallitva) a vedett vegpontok 503-at adnak.
 """
 import collections
+import datetime as dt
 import difflib
 import hmac
 import json
@@ -20,6 +21,7 @@ import aiops
 import detectors
 import evidence
 import ingest
+import maintenance
 import noisemodel
 import novelty
 import rules
@@ -97,6 +99,15 @@ class IncFeedbackIn(BaseModel):
 
 
 INC_ID_RX = re.compile(r"^incident-\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
+class MaintIn(BaseModel):
+    targets: list[str] = Field(..., min_length=1, max_length=20)
+    hours: float = Field(..., gt=0, le=168)
+    start: str | None = Field(None, max_length=20)   # UTC "2026-11-25T18:00:00Z"; nincs: most
+    include_dependents: bool = True
+    note: str = Field("", max_length=300)
+    id: str | None = Field(None, max_length=64)
 
 
 class TopoTestIn(BaseModel):
@@ -271,6 +282,8 @@ def create_app(rt, tokens=None):
     @app.get("/api/v1/status")
     def status(_: Actor = Depends(read)):
         s = dict(aiops.STATUS)
+        s["maintenance_active"] = [{"id": w.get("id"), "targets": w.get("targets", []), "end": w.get("end"), "note": w.get("note", "")}
+                                   for w in maintenance.active()]
         s["config"] = {"known_rev": store.revision_id("known"), "settings_rev": store.revision_id("settings"),
                        "topology_rev": store.revision_id("topology"), "detectors_rev": store.revision_id("detectors"),
                        "rules_rev": store.revision_id("rules")}
@@ -834,6 +847,66 @@ def create_app(rt, tokens=None):
         inc_head(inc)
         store.inc_set_feedback(inc, {"root_cause": body.root_cause, "severity": body.severity, "grouping": body.grouping,
                                      "comment": redact(body.comment.strip())}, who.name)
+        return {"ok": True}
+
+    # ------------------------------------------------------------ karbantartasi ablakok
+    MAINT_KEEP_ENDED = dt.timedelta(days=7)
+
+    def maint_doc():
+        return (store.current("maintenance") or {"content": {"windows": []}})["content"]
+
+    def maint_save(doc, who, comment):
+        now = aiops.utcnow().replace(tzinfo=None)
+        doc = {"windows": [w for w in doc.get("windows", [])   # a 7 napnal regebben lezart ablakok kikerulnek
+                           if (maintenance.parse_ts(w.get("end")) or now) > now - MAINT_KEEP_ENDED]}
+        try:
+            doc = runtime.validate_doc("maintenance", doc)
+            store.put("maintenance", doc, who.name, comment)
+        except runtime.DocError as e:
+            fail(e)
+        rt.changed()
+
+    @app.get("/api/v1/maintenance")
+    def maintenance_list(_: Actor = Depends(read)):
+        """A karbantartasi ablakok allapottal (active / upcoming / ended) es a tenylegesen lefedett eszkozokkel."""
+        doc = maint_doc()
+        return {"rev": store.revision_id("maintenance"), "windows": maintenance.views(aiops.TOPOLOGY, doc),
+                "suppressed": aiops.STATUS.get("maintenance_suppressed", 0)}
+
+    @app.post("/api/v1/maintenance")
+    def maintenance_add(body: MaintIn, who: Actor = Depends(admin)):
+        """Uj ablak (alapbol most indul). Olvaso token: javaslat (POST /proposals, key 'maintenance', content)."""
+        now = aiops.utcnow().replace(tzinfo=None)
+        start = maintenance.parse_ts(body.start) if body.start else now.replace(microsecond=0)
+        if start is None:
+            raise HTTPException(422, {"errors": ["start must be a UTC time like 2026-11-25T18:00:00Z"]})
+        doc = maint_doc()
+        wid = body.id or f"mw-{start.strftime('%Y%m%d-%H%M%S')}"
+        w = {"id": wid, "targets": [t.strip() for t in body.targets], "start": maintenance.fmt_ts(start),
+             "end": maintenance.fmt_ts(start + dt.timedelta(hours=body.hours)), "include_dependents": body.include_dependents}
+        if body.note.strip():
+            w["note"] = redact(body.note.strip())
+        maint_save({"windows": doc.get("windows", []) + [w]}, who, f"maintenance window {wid}: {', '.join(w['targets'])} until {w['end']}")
+        return {"ok": True, "id": wid, "window": maintenance.views(aiops.TOPOLOGY, {"windows": [w]})[0]}
+
+    @app.post("/api/v1/maintenance/{wid}/end")
+    def maintenance_end(wid: str, who: Actor = Depends(admin)):
+        """Ablak lezarasa most (aktiv: az 'end' most; meg nem kezdodott: torles)."""
+        doc = maint_doc()
+        now = aiops.utcnow().replace(tzinfo=None, microsecond=0)
+        out, found = [], False
+        for w in doc.get("windows", []):
+            if w.get("id") != wid:
+                out.append(w)
+                continue
+            found = True
+            s = maintenance.parse_ts(w.get("start"))
+            if s and s <= now:                                # aktiv: most er veget (ha ugyanabban a masodpercben indult, a kezdet 1 mp-cel korabbra)
+                end = min(now, maintenance.parse_ts(w["end"]) or now)
+                out.append(dict(w, start=maintenance.fmt_ts(min(s, end - dt.timedelta(seconds=1))), end=maintenance.fmt_ts(end)))
+        if not found:
+            raise HTTPException(404, "unknown maintenance window")
+        maint_save({"windows": out}, who, f"maintenance window {wid} ended")
         return {"ok": True}
 
     # ------------------------------------------------------------ snooze: ideiglenes nemitas lejarati idovel

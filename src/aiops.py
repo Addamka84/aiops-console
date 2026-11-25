@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.36"
+__version__ = "2.0.0-alpha.37"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1850,6 +1850,11 @@ def poll_incidents(state, now, known=None):
             STATUS["known_issue_alerts"] = STATUS.get("known_issue_alerts", 0) + 1
             log(f"riasztas ismert ugy ({ki['id']}): csak naplozva, nincs incidens: {key}", key=("known_alert", key))
             continue
+        mw = in_maintenance(r.get("_msg", ""), alert_labels(r.get("alerts", ""), r.get("alertname", "")))
+        if mw is not None:                                    # karbantartasi ablak: nincs incidens, nincs korrelacio
+            STATUS["maintenance_suppressed"] = STATUS.get("maintenance_suppressed", 0) + 1
+            log(f"riasztas karbantartasi ablakban ({mw['id']}): csak naplozva, nincs incidens: {key}", key=("maint_alert", key))
+            continue
         firings = note_firing(state, key)                     # minden tuzeles szamit (a 30 perces szuneteltetes alatt is): ebbol latszik a flapping
         last_seen = state["recent_alert_keys"].get(key, 0)   # (nem 'last': az az utolso esemeny ideje, kulon valtozo kell)
         if time.time() - last_seen < 1800:
@@ -1931,6 +1936,17 @@ def flush_alerts(state, now):
         state["alert_items"] = [it for i, it in enumerate(items) if i not in done]
 
 
+def in_maintenance(text, labels):
+    """Aktiv karbantartasi ablakba esik-e (a topologian at, kereskor a fuggokkel)? -> az ablak vagy None. Hiba eseten None (feldolgozodik)."""
+    try:
+        import maintenance
+        vals = [str(v) for lab in (labels or []) for k, v in lab.items() if k != "alertname"]
+        return maintenance.match(TOPOLOGY, text, vals)
+    except Exception as e:  # noqa: BLE001 - a karbantartas-ellenorzes hibaja nem nyelhet el riasztast
+        log(f"karbantartas-ellenorzes hiba: {type(e).__name__}: {e}", key="maint_err")
+        return None
+
+
 def poll_detectors(state, now):
     """A detektor-szal talalatainak feldolgozasa: szuneteltetes (cooldown) csoportonkent, incidens-korlat, akcio (triage / direct / none).
     A talalatok sora (DETECTOR_HITS) szalbiztos; az allapotot (state) csak a fo ciklus modositja."""
@@ -1950,6 +1966,11 @@ def poll_detectors(state, now):
             continue
         text = detectors.describe(d, group, hit["hits"])
         action = d["action"]
+        mw = in_maintenance(text, [{"v": v} for v in (group or {}).values()])
+        if mw is not None:                                    # karbantartasi ablak: a talalat csak naplozva (triage es direct sem)
+            STATUS["maintenance_suppressed"] = STATUS.get("maintenance_suppressed", 0) + 1
+            log(f"detektor-talalat karbantartasi ablakban ({mw['id']}): csak naplozva: {d['id']} {group}", key=("maint_det", key))
+            continue
         if action == "triage":
             state["incident_times"] = [t for t in state["incident_times"] if time.time() - t < 3600]
             if len(state["incident_times"]) >= CFG["MAX_INCIDENTS_PER_HOUR"]:
