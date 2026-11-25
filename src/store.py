@@ -54,6 +54,13 @@ class Store:
                 CREATE TABLE IF NOT EXISTS sup_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, mode TEXT NOT NULL, model TEXT NOT NULL,
                     status TEXT NOT NULL, secs REAL NOT NULL, tokens INTEGER NOT NULL, report TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS inc_state (
+                    inc TEXT PRIMARY KEY, state TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, actor TEXT NOT NULL,
+                    feedback TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS inc_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, inc TEXT NOT NULL, ts TEXT NOT NULL, actor TEXT NOT NULL,
+                    kind TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS inc_events_inc ON inc_events (inc, id);
             """)
             self.db.commit()
 
@@ -345,6 +352,64 @@ class Store:
     # ---- audit
     AUDIT_KEEP_DAYS = 400        # az audit-naplo IDO szerint forog (korabban 2000 sor: egy read token kiszorithatta az admin-bejegyzeseket; audit M6)
     AUDIT_MAX_ROWS = 500000      # vedokorlat a tar meretere
+
+    # ---- incidensek: allapot, jegyzet, visszajelzes (maga az incidens a VictoriaLogs pipeline:ai esemenyeiben van)
+    INC_STATES = ("open", "acknowledged", "resolved")
+
+    def inc_meta(self, ids):
+        """-> {inc: {state, owner, ts, actor, feedback(dict|None)}} a megadott incidensekre (nincs sor: nincs kulcs = 'open')."""
+        ids = list(ids)
+        out = {}
+        with self.lock:
+            for i in range(0, len(ids), 500):
+                part = ids[i:i + 500]
+                q = f"SELECT * FROM inc_state WHERE inc IN ({','.join('?' * len(part))})"
+                for r in self.db.execute(q, part):
+                    out[r["inc"]] = {"state": r["state"], "owner": r["owner"], "ts": r["ts"], "actor": r["actor"],
+                                     "feedback": json.loads(r["feedback"]) if r["feedback"] else None}
+        return out
+
+    def _inc_row(self, inc, actor):
+        cur = self.db.execute("SELECT * FROM inc_state WHERE inc=?", (inc,)).fetchone()
+        if cur is None:
+            self.db.execute("INSERT INTO inc_state (inc, state, owner, ts, actor) VALUES (?, 'open', '', ?, ?)", (inc, now_iso(), actor))
+            cur = self.db.execute("SELECT * FROM inc_state WHERE inc=?", (inc,)).fetchone()
+        return cur
+
+    def inc_set_state(self, inc, state, actor, owner=None):
+        if state not in self.INC_STATES:
+            raise StoreError(f"state must be one of {', '.join(self.INC_STATES)}")
+        with self.lock:
+            cur = self._inc_row(inc, actor)
+            new_owner = cur["owner"] if owner is None else owner
+            self.db.execute("UPDATE inc_state SET state=?, owner=?, ts=?, actor=? WHERE inc=?", (state, new_owner, now_iso(), actor, inc))
+            body = {"from": cur["state"], "to": state}
+            if owner is not None and owner != cur["owner"]:
+                body["owner"] = owner
+            self.db.execute("INSERT INTO inc_events (inc, ts, actor, kind, body) VALUES (?, ?, ?, 'state', ?)", (inc, now_iso(), actor, json.dumps(body)))
+            self._audit(actor, "incident.state", f"{inc}: {cur['state']} -> {state}" + (f", owner {owner}" if "owner" in body else ""))
+            self.db.commit()
+
+    def inc_add_note(self, inc, text, actor):
+        with self.lock:
+            self._inc_row(inc, actor)
+            self.db.execute("INSERT INTO inc_events (inc, ts, actor, kind, body) VALUES (?, ?, ?, 'note', ?)", (inc, now_iso(), actor, json.dumps({"text": text})))
+            self._audit(actor, "incident.note", f"{inc}: {text[:120]}")
+            self.db.commit()
+
+    def inc_set_feedback(self, inc, fb, actor):
+        """A legutobbi visszajelzes szamit (a minosegi statisztikaban); a korabbiak az idovonalon maradnak."""
+        with self.lock:
+            self._inc_row(inc, actor)
+            self.db.execute("UPDATE inc_state SET feedback=? WHERE inc=?", (json.dumps(fb), inc))
+            self.db.execute("INSERT INTO inc_events (inc, ts, actor, kind, body) VALUES (?, ?, ?, 'feedback', ?)", (inc, now_iso(), actor, json.dumps(fb)))
+            self._audit(actor, "incident.feedback", f"{inc}: " + ", ".join(f"{k}={v}" for k, v in fb.items() if k != "comment"))
+            self.db.commit()
+
+    def inc_events(self, inc):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM inc_events WHERE inc=? ORDER BY id", (inc,)).fetchall()
+        return [{"ts": r["ts"], "actor": r["actor"], "kind": r["kind"], "body": json.loads(r["body"])} for r in rows]
 
     def _audit(self, actor, action, detail):
         self.db.execute("INSERT INTO audit (ts, actor, action, detail) VALUES (?,?,?,?)", (now_iso(), actor, action, detail))

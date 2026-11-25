@@ -120,6 +120,18 @@ class LiveTests(unittest.TestCase):
         r = aiops.explain_line(known(), "homesrv", "backup", "completely different text here", "syslog", "err", raw=self.raw(1), now=NOW)
         self.assertEqual(outcome(r), "not_found")
 
+    def test_closest_pattern_when_wording_differs(self):
+        """Elo hiba (2026-11-25): 'LED-12' a beirt sorban, 'LED-<N>mPC' a valodiban -> korabban 'too rare', pedig a modellhez jutott."""
+        raw = {"a": [srow("homeassistant", "homeassistant", "<N>-<N>-<N> <N>:<N>:<N>.<N> ERROR (MainThread) [custom_components.tuya_local.device] "
+                          "Failed to refresh device state for LED-<N>mPC. Device reported error <N>: Network Error", 153)], "b": [], "d": []}
+        lk = lambda *a: {"hits": 153, "first": None, "last": None, "phrase": "x"}  # noqa: E731
+        r = aiops.explain_line(aiops.Known(data={}), "homeassistant", "homeassistant",
+                               "ERROR (MainThread) [custom_components.tuya_local.device] Failed to refresh device state for LED-12. Device reported error 914",
+                               "syslog", "err", raw=raw, now=dt.datetime(2026, 11, 24, 9, 0), lookup=lk)
+        self.assertEqual(outcome(r), "reaches_model")
+        self.assertTrue(r["live"]["approx"])
+        self.assertIn("closest collected pattern", r["live"]["detail"])
+
     def test_lookup_logged_but_too_rare(self):
         lk = lambda s, h, i, m: {"hits": 3, "first": "2026-11-25T07:00:00Z", "last": "2026-11-25T07:20:00Z", "phrase": "x"}  # noqa: E731
         r = aiops.explain_line(known(), "esx-04", "vrops", "Symptom: datastore latency anomaly on LUN 7", "syslog", "warning",

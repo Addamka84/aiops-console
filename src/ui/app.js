@@ -79,7 +79,7 @@ const isAdmin = () => S.role === 'admin';
 
 // ---------------------------------------------------------------- shell
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
-const TABS = [['status', 'Status', 'Monitor'], ['history', 'History', 'Monitor'],
+const TABS = [['status', 'Status', 'Monitor'], ['incidents', 'Incidents', 'Monitor'], ['history', 'History', 'Monitor'],
   ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['rules', 'Alert rules', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['settings', 'Settings', 'Configure'],
   ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
 
@@ -136,7 +136,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, incidents: pageIncidents, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -183,6 +183,121 @@ function resultCard(title, r) {
       r.ungrounded_hosts ? ' · ' + r.ungrounded_hosts + ' invented name(s) removed from the model output' : '') : null,
     h('p', {}, r.summary || ''), issueList(r.issues));
 }
+// ---------------------------------------------------------------- incidents (list, timeline, state, notes, feedback)
+S.inc = { hours: 168, state: 'unresolved', list: null, quality: null, sel: null, detail: null, error: '', note: '', owner: '',
+  fb: { root_cause: 'correct', severity: 'right', grouping: 'right', comment: '' } };
+const INC_STATE_CLS = { open: 'b-pending', acknowledged: 'b-ok', resolved: 'b-approved' };
+const FB_OPTS = { root_cause: [['correct', 'Root cause correct'], ['wrong', 'Root cause wrong'], ['unsure', 'Not sure'], ['n/a', 'No root cause given']],
+  severity: [['right', 'Severity right'], ['too_high', 'Severity too high'], ['too_low', 'Severity too low']],
+  grouping: [['right', 'Grouping right'], ['should_split', 'Should be split'], ['should_merge', 'Should be merged'], ['n/a', 'Single alert']] };
+const fbLabel = (k, v) => ((FB_OPTS[k].find((o) => o[0] === v) || [v, v])[1]);
+async function loadIncList() {
+  const x = S.inc;
+  try {
+    [x.list, x.quality] = await Promise.all([api('GET', '/api/v1/incidents?hours=' + x.hours + '&state=' + x.state),
+      api('GET', '/api/v1/incidents/quality?days=30')]);
+    x.error = '';
+  } catch (e) { x.error = e.message; x.list = x.list || []; }
+}
+async function loadIncDetail() {
+  const x = S.inc;
+  if (!x.sel) { x.detail = null; return; }
+  try {
+    x.detail = await api('GET', '/api/v1/incidents/' + encodeURIComponent(x.sel));
+    x.owner = x.detail.owner || '';
+    if (x.detail.feedback) x.fb = Object.assign({ comment: '' }, x.detail.feedback);
+  } catch (e) { x.detail = null; x.error = e.message; }
+}
+async function pageIncidents() { await loadIncList(); await loadIncDetail(); drawInc(); }
+async function incSelect(id) {
+  S.inc.sel = id; S.inc.note = ''; S.inc.fb = { root_cause: 'correct', severity: 'right', grouping: 'right', comment: '' };
+  await loadIncDetail(); drawInc();
+  const d = document.getElementById('inc-detail'); if (d) d.scrollIntoView({ block: 'start' });
+}
+async function incPost(path, body, msg) {
+  try { await api('POST', '/api/v1/incidents/' + encodeURIComponent(S.inc.sel) + path, body); toast(msg); } catch (e) { toast(e.message, true); return; }
+  await loadIncList(); await loadIncDetail(); drawInc();
+}
+function pctOf(r) { return r && r.rated ? r.good + '/' + r.rated + ' (' + Math.round(r.rate * 100) + '%)' : 'no ratings yet'; }
+function incTimeline(d) {
+  const ev = [{ ts: d.time, who: 'alerting', what: (d.alert_items.length ? d.alert_items.length + ' alert(s) grouped' : 'Alert') + (d.root_hypothesis ? ' · root hypothesis ' + d.root_hypothesis : '') },
+    { ts: d.time, who: 'model', what: 'AI triage: ' + d.issue_count + ' issue(s), max ' + (d.max_severity || 'none') + (d.secs ? ' · ' + d.secs + ' s' : '') }];
+  for (const e of d.events) {
+    const b = e.body || {};
+    const what = e.kind === 'state' ? 'State ' + b.from + ' → ' + b.to + (b.owner !== undefined ? ' · owner ' + (b.owner || '-') : '')
+      : e.kind === 'note' ? 'Note: ' + b.text
+        : 'Feedback: ' + ['root_cause', 'severity', 'grouping'].map((k) => fbLabel(k, b[k])).join(', ') + (b.comment ? ' · ' + b.comment : '');
+    ev.push({ ts: e.ts, who: e.actor, what });
+  }
+  return h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Time'), h('th', {}, 'Who'), h('th', {}, 'What'))),
+    h('tbody', {}, ev.map((e) => h('tr', {}, h('td', { class: 'nowrap small' }, fmtTime(e.ts)), h('td', { class: 'small nowrap' }, e.who), h('td', { class: 'small' }, e.what)))));
+}
+function incDetailEl(d) {
+  const x = S.inc;
+  const sel = (k) => h('select', { onchange: (e) => { x.fb[k] = e.target.value; } }, FB_OPTS[k].map(([v, l]) => h('option', { value: v, selected: x.fb[k] === v }, l)));
+  const st = d.state;
+  const actions = isAdmin() ? h('div', { style: 'margin-top:12px' },
+    h('div', { class: 'row' },
+      h('input', { placeholder: 'owner (optional)', value: x.owner, style: 'width:180px', oninput: (e) => { x.owner = e.target.value; } }),
+      st !== 'acknowledged' && st !== 'resolved' ? h('button', { class: 'btn primary', onclick: () => incPost('/state', { state: 'acknowledged', owner: x.owner }, 'Acknowledged') }, 'Acknowledge') : null,
+      st !== 'resolved' ? h('button', { class: 'btn', onclick: () => incPost('/state', { state: 'resolved', owner: x.owner }, 'Resolved') }, 'Resolve')
+        : h('button', { class: 'btn', onclick: () => incPost('/state', { state: 'open', owner: x.owner }, 'Reopened') }, 'Reopen')),
+    h('h3', {}, 'Was the triage right?'),
+    h('p', { class: 'muted small' }, 'Your answer is the measurement: the quality figures at the top come from it. The latest answer counts; earlier ones stay in the timeline.'),
+    h('div', { class: 'row' }, sel('root_cause'), sel('severity'), sel('grouping')),
+    h('div', { class: 'row', style: 'margin-top:6px' },
+      h('input', { class: 'grow', placeholder: 'Comment (optional): what was the real cause?', value: x.fb.comment || '', oninput: (e) => { x.fb.comment = e.target.value; } }),
+      h('button', { class: 'btn primary', onclick: () => incPost('/feedback', x.fb, 'Feedback saved') }, d.feedback ? 'Update feedback' : 'Save feedback')),
+    h('h3', {}, 'Note'),
+    h('div', { class: 'row' },
+      h('input', { class: 'grow', placeholder: 'What did you find or do?', value: x.note, oninput: (e) => { x.note = e.target.value; } }),
+      h('button', { class: 'btn', onclick: () => { if (x.note.trim()) incPost('/notes', { text: x.note }, 'Note added'); } }, 'Add note')))
+    : h('p', { class: 'muted small' }, 'Admin token required to change the state, add notes or give feedback.');
+  return h('div', { class: 'panel', id: 'inc-detail' },
+    h('div', { class: 'row' }, sevBadge(d.max_severity || 'info'), h('h3', { style: 'margin:0' }, d.title), h('span', { class: 'grow' }),
+      h('span', { class: 'badge ' + (INC_STATE_CLS[st] || 'b-unknown') }, st), d.owner ? h('span', { class: 'muted small' }, 'owner: ' + d.owner) : null,
+      h('button', { class: 'icon', title: 'Close', onclick: () => { x.sel = null; x.detail = null; drawInc(); } }, '×')),
+    h('p', { class: 'muted small' }, [fmtTime(d.time), d.model, d.window].filter(Boolean).join(' · ')),
+    d.correlated_alerts > 1 || d.root_hypothesis ? h('p', { class: 'small' }, h('span', { class: 'badge sev-low' }, 'correlated'),
+      ' ' + d.correlated_alerts + ' alert(s) grouped via the topology' + (d.root_hypothesis ? ' · root hypothesis: ' + d.root_hypothesis + ' (confidence ' + d.root_confidence + ')' : '')) : null,
+    h('p', {}, d.summary),
+    d.alert_items.length ? h('details', {}, h('summary', { class: 'small' }, 'Grouped alerts (' + d.alert_items.length + ')'),
+      h('ul', { class: 'small mono' }, d.alert_items.map((t) => h('li', {}, t)))) : h('p', { class: 'small mono muted' }, d.alert),
+    issueList(d.issues),
+    d.guard_notes.length ? h('div', { class: 'note small' }, 'Guards changed the model output: ' + d.guard_notes.join('; ')) : null,
+    h('h3', {}, 'Timeline'), incTimeline(d),
+    actions);
+}
+function drawInc() {
+  const x = S.inc, q = x.quality;
+  const rows = (x.list || []).map((i) => h('tr', { class: i.id === x.sel ? 'sel' : '', style: 'cursor:pointer', onclick: () => incSelect(i.id) },
+    h('td', { class: 'nowrap small' }, fmtTime(i.time)), h('td', {}, sevBadge(i.max_severity || 'info')),
+    h('td', {}, i.title, i.root_hypothesis ? h('div', { class: 'muted small' }, 'root hypothesis: ' + i.root_hypothesis) : null),
+    h('td', { class: 'num' }, i.correlated_alerts), h('td', {}, h('span', { class: 'badge ' + (INC_STATE_CLS[i.state] || 'b-unknown') }, i.state), i.owner ? h('div', { class: 'muted small' }, i.owner) : null),
+    h('td', { class: 'small' }, i.feedback ? fbLabel('root_cause', i.feedback.root_cause) : h('span', { class: 'muted' }, '-'))));
+  renderShell([
+    h('h2', {}, 'Incidents'),
+    h('p', { class: 'muted' }, 'AI-triaged incidents with their state, notes and your feedback. The incident itself is stored in VictoriaLogs; the state, notes and feedback are kept by the console and audited.'),
+    q ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Triage quality (last 30 days, from your feedback)'),
+      h('div', { class: 'stats' },
+        h('div', { class: 'stat' }, h('div', { class: 'big' }, q.with_feedback + ' / ' + q.incidents), h('div', { class: 'small muted' }, 'incidents with feedback')),
+        h('div', { class: 'stat' }, h('div', { class: 'big' }, pctOf(q.root_cause)), h('div', { class: 'small muted' }, 'root cause correct')),
+        h('div', { class: 'stat' }, h('div', { class: 'big' }, pctOf(q.severity)), h('div', { class: 'small muted' }, 'severity right (' + q.severity_too_high + ' too high, ' + q.severity_too_low + ' too low)')),
+        h('div', { class: 'stat' }, h('div', { class: 'big' }, pctOf(q.grouping)), h('div', { class: 'small muted' }, 'grouping right')))) : null,
+    x.error ? h('div', { class: 'err' }, x.error) : null,
+    x.detail ? incDetailEl(x.detail) : null,
+    h('div', { class: 'panel' },
+      h('div', { class: 'row' },
+        h('select', { onchange: async (e) => { x.state = e.target.value; await loadIncList(); drawInc(); } },
+          [['unresolved', 'Not resolved'], ['all', 'All'], ['open', 'Open'], ['acknowledged', 'Acknowledged'], ['resolved', 'Resolved']].map(([v, l]) => h('option', { value: v, selected: v === x.state }, l))),
+        h('select', { onchange: async (e) => { x.hours = Number(e.target.value); await loadIncList(); drawInc(); } },
+          [[24, 'Last 24 h'], [168, 'Last 7 days'], [720, 'Last 30 days']].map(([v, l]) => h('option', { value: v, selected: v === x.hours }, l))),
+        h('span', { class: 'muted small' }, (x.list || []).length + ' incident(s)')),
+      rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Time', 'Severity', 'Incident', 'Alerts', 'State', 'Feedback'].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
+        : h('p', { class: 'muted' }, 'No incidents in this view.')),
+  ]);
+}
+
 // ---------------------------------------------------------------- statistics (review of the last check, log volume chart)
 const SVGNS = 'http://www.w3.org/2000/svg';
 function svgEl(tag, attrs, ...kids) {
@@ -405,6 +520,8 @@ async function pageStatus() {
     runsTable(S.stats.runs),
     resultCard('Last digest', s.last_digest),
     resultCard('Last incident', s.last_incident),
+    s.last_incident ? h('p', { class: 'small' }, h('button', { class: 'btn', onclick: () => go('incidents') }, 'Open the incident list'),
+      ' · state, notes and feedback for every incident') : null,
   ]);
   if (!S.timer) {
     S.timer = setInterval(() => {

@@ -120,6 +120,12 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /novelty?status=open&limit=100` (read) | new-pattern / rate-spike findings plus the detector state (baseline size, last scan, errors); `status` `open`/`dismissed`/`all` |
 | `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (admin) | mark findings as reviewed |
 | `GET/PUT /config/topology` (read/admin), `POST /proposals` with `"key":"topology"` and `content` | the topology document `{"assets": [...]}` (validated: unique ids/names/aliases/IPs, references must exist); versioned like the other documents |
+| `GET /incidents?hours=168&state=unresolved\|all\|open\|acknowledged\|resolved` (read) | AI-triaged incidents (from VictoriaLogs) with the console-side state, owner and latest feedback |
+| `GET /incidents/{id}` (read) | one incident: grouped alerts, issues, guard notes, timeline (state changes, notes, feedback) |
+| `POST /incidents/{id}/state` (admin) | `{"state": "open\|acknowledged\|resolved", "owner"?}` |
+| `POST /incidents/{id}/notes` (admin) | `{"text": "..."}` (secrets are redacted) |
+| `POST /incidents/{id}/feedback` (admin) | `{"root_cause": "correct\|wrong\|unsure\|n/a", "severity": "right\|too_high\|too_low", "grouping": "right\|should_split\|should_merge\|n/a", "comment"?}`; the latest one counts |
+| `GET /incidents/quality?days=30` (read) | triage quality from the feedback: root cause correct, severity right, grouping right (rated / good / rate) |
 | `POST /explain` (read) | `{"host", "ident", "message", "source": "syslog\|journald\|docker", "level"?, "hours": 24, "content": {...}?}`: why a log line is or is not in the model input, step by step (level filter, noise rule, snooze, known issue, volume cap in the live window); `hours: 0` checks the rules only |
 | `POST /test/topology` (read) | `{"text": "...", "content": {...}?}`: the devices found in the text and the topology section the model would get (uses unsaved `content` if given) |
 | `GET/PUT /config/detectors` (read/admin), `POST /proposals` with `"key":"detectors"` and `content` | the detectors document `{"detectors": [{id, name, query, mode: count\|absent, threshold, window_min, group_by, cooldown_min, action: triage\|direct\|none, severity, enabled, note}]}` (validated, versioned, hot reload) |
@@ -266,3 +272,12 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Severity & ingest page:** the effective mapping wraps inside its card instead of running off the right edge.
 
 ![Why isn't it shown?](docs/screenshots/explain.png)
+
+### Incident workbench and triage feedback (v2.0.0-alpha.35)
+- **Incidents page:** every AI-triaged incident with its state (open, acknowledged, resolved), owner and feedback; filter by state and window. The detail view shows the grouped alerts, the root-cause hypothesis, the issues, what the guards changed, and a timeline (alerting, AI triage, state changes, notes, feedback).
+- **Feedback is the measurement:** an admin answers three questions per incident: was the root cause correct, was the severity right (or too high / too low), was the grouping right (or should it be split / merged). The latest answer counts; the page shows the rates for the last 30 days (`GET /api/v1/incidents/quality`). These are the labels a build-vs-buy comparison needs, collected in the tool itself.
+- **Storage:** the incident stays in VictoriaLogs (`pipeline:ai`); the console keeps only the state, notes and feedback (SQLite, audited). New incidents also store their grouped alerts (`alert_items`); older ones show the first alert.
+- **Trade-off:** changing the state, adding notes and giving feedback needs the admin token; there is no separate operator role yet.
+- **Fix:** "Why isn't it shown?" no longer calls a line "too rare" when the typed text differs slightly from the logged one (e.g. a device name); it uses the closest collected pattern and says so.
+
+![Incidents](docs/screenshots/incidents.png)

@@ -76,6 +76,29 @@ class ExplainIn(BaseModel):
     content: dict | None = None  # a meg nem mentett known-szerkesztes (ha nincs: a mentett dokumentum)
 
 
+class IncStateIn(BaseModel):
+    state: str = Field(..., max_length=20)
+    owner: str | None = Field(None, max_length=80)
+
+
+class IncNoteIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+
+
+FB_CHOICES = {"root_cause": ("correct", "wrong", "unsure", "n/a"), "severity": ("right", "too_high", "too_low"),
+              "grouping": ("right", "should_split", "should_merge", "n/a")}
+
+
+class IncFeedbackIn(BaseModel):
+    root_cause: str = Field(..., max_length=20)
+    severity: str = Field(..., max_length=20)
+    grouping: str = Field(..., max_length=20)
+    comment: str = Field("", max_length=1000)
+
+
+INC_ID_RX = re.compile(r"^incident-\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
 class TopoTestIn(BaseModel):
     text: str = ""
     content: dict | None = None  # a meg nem mentett szerkesztes (ha nincs: a mentett topologia)
@@ -685,6 +708,133 @@ def create_app(rt, tokens=None):
                         "all_clear": r.get("all_clear") == "true", "dropped_known": int(r.get("dropped_known") or 0),
                         "secs": float(r.get("secs") or 0), "prompt_tokens": r.get("prompt_tokens"), "stats": st})
         return out
+
+    # ------------------------------------------------------------ incidensek: lista, reszletek, allapot, jegyzet, visszajelzes
+    SEV_ORDER = {s: i for i, s in enumerate(aiops.SEVERITIES)}
+
+    def inc_heads(hours, limit):
+        return aiops.vl_query(f"_time:{int(hours)}h pipeline:ai kind:incident | sort by (_time desc) | limit {int(limit)}", timeout=20)
+
+    def inc_issues(hours, parents=None):
+        flt = f" parent:in({','.join(json.dumps(p) for p in parents)})" if parents else ""
+        rows = aiops.vl_query(f"_time:{int(hours)}h pipeline:ai kind:issue{flt} | sort by (_time desc) | limit 3000", timeout=20)
+        by = {}
+        for r in rows:
+            by.setdefault(str(r.get("parent", "")), []).append({
+                "title": r.get("title", ""), "severity": r.get("severity", ""), "status": r.get("status", ""),
+                "hosts": [x.strip() for x in str(r.get("hosts", "")).split(",") if x.strip()],
+                "evidence": r.get("evidence", ""), "likely_cause": r.get("likely_cause", ""), "suggested_action": r.get("suggested_action", "")})
+        for v in by.values():
+            v.sort(key=lambda i: -SEV_ORDER.get(i["severity"], -1))
+        return by
+
+    def inc_view(hd, issues, meta):
+        m = meta or {}
+        top = issues[0] if issues else None
+        return {"id": hd.get("id"), "time": hd.get("_time"), "alert": hd.get("alert", ""), "summary": str(hd.get("_msg", "")).removeprefix("[AI incident] "),
+                "title": (top or {}).get("title") or str(hd.get("alert", ""))[:120], "max_severity": hd.get("max_severity", ""),
+                "issue_count": int(hd.get("issue_count") or 0), "correlated_alerts": int(hd.get("correlated_alerts") or 1),
+                "root_hypothesis": hd.get("root_hypothesis", ""), "root_confidence": hd.get("root_confidence", ""),
+                "state": m.get("state", "open"), "owner": m.get("owner", ""), "state_ts": m.get("ts"), "feedback": m.get("feedback")}
+
+    def inc_check(inc):
+        if not INC_ID_RX.match(inc):
+            raise HTTPException(404, "unknown incident id")
+
+    def inc_head(inc):
+        inc_check(inc)
+        try:
+            rows = aiops.vl_query(f"_time:400d pipeline:ai kind:incident id:={json.dumps(inc)} | limit 1", timeout=20)
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        if not rows:
+            raise HTTPException(404, "unknown incident id")
+        return rows[0]
+
+    @app.get("/api/v1/incidents")
+    def incidents(hours: int = Query(168, ge=1, le=2160), state: str = "all", limit: int = Query(100, ge=1, le=500), _: Actor = Depends(read)):
+        """Az AI-incidensek (a VictoriaLogs pipeline:ai esemenyeibol) a konzolon tarolt allapottal es visszajelzessel."""
+        if state not in ("all", "unresolved") + store.INC_STATES:
+            raise HTTPException(422, {"errors": ["state must be all, unresolved, open, acknowledged or resolved"]})
+        try:
+            heads = inc_heads(hours, limit)
+            issues = inc_issues(hours, [str(h.get("id", "")) for h in heads if h.get("id")]) if heads else {}
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        meta = store.inc_meta(str(h.get("id", "")) for h in heads)
+        out = [inc_view(h, issues.get(str(h.get("id", "")), []), meta.get(str(h.get("id", "")))) for h in heads]
+        if state == "unresolved":
+            out = [x for x in out if x["state"] != "resolved"]
+        elif state != "all":
+            out = [x for x in out if x["state"] == state]
+        return out
+
+    @app.get("/api/v1/incidents/quality")
+    def incidents_quality(days: int = Query(30, ge=1, le=365), _: Actor = Depends(read)):
+        """Mennyire volt jo a triazs az emberi visszajelzes szerint (a legutobbi visszajelzes incidensenkent)."""
+        try:
+            heads = inc_heads(days * 24, 2000)
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        meta = store.inc_meta(str(h.get("id", "")) for h in heads)
+        fbs = [m["feedback"] for m in meta.values() if m.get("feedback")]
+
+        def rate(key, good, skip=("n/a", "unsure")):
+            vals = [f.get(key) for f in fbs if f.get(key) not in skip]
+            return {"good": sum(1 for v in vals if v == good), "rated": len(vals),
+                    "rate": round(sum(1 for v in vals if v == good) / len(vals), 3) if vals else None}
+        sev = [f.get("severity") for f in fbs]
+        return {"days": days, "incidents": len(heads), "with_feedback": len(fbs),
+                "states": {s: sum(1 for h in heads if (meta.get(str(h.get("id", ""))) or {}).get("state", "open") == s) for s in store.INC_STATES},
+                "root_cause": rate("root_cause", "correct"), "severity": rate("severity", "right"), "grouping": rate("grouping", "right"),
+                "severity_too_high": sev.count("too_high"), "severity_too_low": sev.count("too_low")}
+
+    @app.get("/api/v1/incidents/{inc}")
+    def incident(inc: str, _: Actor = Depends(read)):
+        hd = inc_head(inc)
+        try:
+            issues = inc_issues(400 * 24, [inc]).get(inc, [])
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        v = inc_view(hd, issues, store.inc_meta([inc]).get(inc))
+        try:
+            items = json.loads(hd.get("alert_items") or "[]")
+        except ValueError:
+            items = []
+        try:
+            stats = json.loads(hd.get("stats") or "{}")
+        except ValueError:
+            stats = {}
+        v.update(issues=issues, alert_items=items if isinstance(items, list) else [], window=hd.get("window", ""), model=hd.get("model", ""),
+                 endpoint=hd.get("endpoint", ""), secs=hd.get("secs"), guard_notes=[x for x in str(hd.get("guard_notes", "")).split(" | ") if x],
+                 ungrounded_hosts=int(hd.get("ungrounded_hosts") or 0), dropped_known=int(hd.get("dropped_known") or 0), stats=stats,
+                 events=store.inc_events(inc))
+        return v
+
+    @app.post("/api/v1/incidents/{inc}/state")
+    def incident_state(inc: str, body: IncStateIn, who: Actor = Depends(admin)):
+        inc_head(inc)
+        try:
+            store.inc_set_state(inc, body.state, who.name, None if body.owner is None else body.owner.strip())
+        except StoreError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        return {"ok": True}
+
+    @app.post("/api/v1/incidents/{inc}/notes")
+    def incident_note(inc: str, body: IncNoteIn, who: Actor = Depends(admin)):
+        inc_head(inc)
+        store.inc_add_note(inc, redact(body.text.strip()), who.name)
+        return {"ok": True}
+
+    @app.post("/api/v1/incidents/{inc}/feedback")
+    def incident_feedback(inc: str, body: IncFeedbackIn, who: Actor = Depends(admin)):
+        errs = [f"{k} must be one of {', '.join(v)}" for k, v in FB_CHOICES.items() if getattr(body, k) not in v]
+        if errs:
+            raise HTTPException(422, {"errors": errs})
+        inc_head(inc)
+        store.inc_set_feedback(inc, {"root_cause": body.root_cause, "severity": body.severity, "grouping": body.grouping,
+                                     "comment": redact(body.comment.strip())}, who.name)
+        return {"ok": True}
 
     # ------------------------------------------------------------ snooze: ideiglenes nemitas lejarati idovel
     def snooze_views():

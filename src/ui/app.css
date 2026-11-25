@@ -114,6 +114,7 @@ tr.unused td { opacity: .6; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .stat .big { font-size: 20px; font-weight: 650; }
+tr.sel td { background: var(--info-bg); }
 svg.chart { width: 100%; height: auto; display: block; }
 svg.chart .grid-line { stroke: var(--line); stroke-width: 1; }
 svg.chart .axis { fill: var(--muted); font-size: 11px; }

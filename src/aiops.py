@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.34"
+__version__ = "2.0.0-alpha.35"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -836,8 +836,25 @@ def _explain_live(known, raw, source, host, ident, tmpl):
     rows = raw.get(sec, []) or []
     kept = [x for x in rows if known.classify_row(row_text(x, hf, idf))[0] == "keep"]
     hit = next((x for x in rows if same(x)), None)
+    approx = ""
+    if hit is None:
+        # a beirt szoveg ritkan pontos (masik eszkoznev, levagott resz): a leghosszabb szoszerkezetet tartalmazo, legtobbszor elofordulo minta
+        lit = norm_msg(line_literal(tmpl.replace("<N>", "0")))
+        if len(lit) >= 12:
+            cands = [x for x in rows if str(x.get(hf, "")).lower() == host.lower() and str(x.get(idf, "")).lower() == ident.lower()
+                     and lit in norm_msg(x.get("_msg", ""))]
+            if cands:
+                hit = max(cands, key=lambda x: _int(x.get("hits")))
+                approx = f" (closest collected pattern, the wording differs: {cut(strip_ts(hit.get('_msg', '')), 120)})"
     if hit is None:
         return {"found": False, "detail": "not among the lines collected for the model in the window (other level, other wording, or not logged)"}
+    res = _rank_hit(known, kept, source, host, ident, hit, hf, idf)
+    if approx:
+        res = dict(res, approx=True, pattern=strip_ts(hit.get("_msg", "")), detail=res["detail"] + approx)
+    return res
+
+
+def _rank_hit(known, kept, source, host, ident, hit, hf, idf):
     hits = hit.get("hits")
     timing_s = f", first {str(hit.get('first', ''))[:19]}, last {str(hit.get('last', ''))[:19]} UTC" if hit.get("last") else ""
     base = {"found": True, "hits": hits, "first": hit.get("first"), "last": hit.get("last")}
@@ -860,7 +877,7 @@ def _explain_live(known, raw, source, host, ident, tmpl):
             return dict(base, capped=False, rank=prank, cap=mp, detail=f"seen {hits}x{timing_s}; the container is shown, but this pattern ranks {prank}: only the top {mp} patterns are quoted (it still counts in the container total)")
         return dict(base, capped=False, rank=prank, cap=mp, detail=f"seen {hits}x{timing_s}; reaches the model (container rank {crank}, pattern rank {prank})")
     rank = next(i for i, x in enumerate(kept) if x is hit) + 1
-    cap = SECTION_CAPS[sec]
+    cap = SECTION_CAPS[_SECTION_OF[source][0]]
     if rank > cap:
         return dict(base, capped=True, rank=rank, cap=cap, detail=f"seen {hits}x{timing_s}, but it ranks {rank} by count among the kept {source} patterns: only the top {cap} reach the model")
     return dict(base, capped=False, rank=rank, cap=cap, detail=f"seen {hits}x{timing_s}; reaches the model (rank {rank} of the top {cap})")
@@ -1396,6 +1413,7 @@ def run_job(job, known, pool, dry_run=False):
     if job["kind"] == "incident":
         result["alert"] = redact(job.get("alert_text", ""))
         result["alert_key"] = job.get("key", "")
+        result["alert_items"] = [redact(str(it.get("text", "")))[:300] for it in (job.get("items") or [])][:12]
         if job.get("correlation"):
             result["correlation"] = job["correlation"]
             result["correlated_alerts"] = len(job.get("items") or [])
@@ -1701,6 +1719,8 @@ def to_events(result):
     head["guard_notes"] = " | ".join(result.get("guard_notes") or [])
     if result["kind"] == "incident":
         head["alert"] = result.get("alert", "")
+        if result.get("alert_items"):
+            head["alert_items"] = json.dumps(result["alert_items"], ensure_ascii=False)
         if result.get("correlation"):
             c = result["correlation"]
             head["correlated_alerts"] = str(result.get("correlated_alerts", 1))
