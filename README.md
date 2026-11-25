@@ -10,6 +10,18 @@ VictoriaLogs ──► pre-filter (noise / known issues) ──► Ollama (JSON 
         config store (SQLite, versioned) ◄── REST API / UI
 ```
 
+## Screenshots
+All screenshots come from the [demo environment](demo/README.md): synthetic events, the deterministic demo model, no real data.
+
+**Status:** LLM endpoints, new-pattern findings, what the last check reviewed, log volume, and the last incident. Here a hypervisor failure (`esx-02`) turned 8 alerts into one correlated incident with a root-cause hypothesis.
+
+![Status page](docs/screenshots/status.png)
+
+| | |
+|---|---|
+| **Proposals:** a Supervisor suggestion with its diff, waiting for an admin to approve it. ![Proposals](docs/screenshots/proposals.png) | **Supervisor:** a periodic review that files findings and proposals; it never changes anything itself. ![Supervisor](docs/screenshots/supervisor.png) |
+| **Topology:** devices and dependencies; the model may only claim a cause along these. ![Topology](docs/screenshots/topology.png) | **Noise & known issues:** regex rules that run before the model sees the logs. ![Noise and known issues](docs/screenshots/known.png) |
+
 ## Design points
 - **LLMs are poor at suppression, so it is done in code**: regexes remove known-harmless noise *before* the model sees the logs,
   and acknowledged problems are dropped from the model's *output*.
