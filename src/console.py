@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -99,6 +100,14 @@ class IncFeedbackIn(BaseModel):
 
 
 INC_ID_RX = re.compile(r"^incident-\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+RUN_ID_RX = re.compile(r"^(incident|digest)-\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+MODEL_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
+REPLAY_MAX_DAYS = int(os.environ.get("REPLAY_MAX_DAYS", "30"))   # a VictoriaLogs megorzesi ideje: regebbi ablak nyers sorai mar nincsenek meg
+
+
+class ReplayIn(BaseModel):
+    source: str = Field(..., max_length=40)          # a tarolt digest / incidens azonositoja (pl. incident-2026-11-25T10:30:57Z)
+    model: str | None = Field(None, max_length=100)  # ures: a jelenlegi modell
 
 
 class MaintIn(BaseModel):
@@ -853,6 +862,93 @@ def create_app(rt, tokens=None):
         store.inc_set_feedback(inc, {"root_cause": body.root_cause, "severity": body.severity, "grouping": body.grouping,
                                      "comment": redact(body.comment.strip())}, who.name)
         return {"ok": True}
+
+    # ------------------------------------------------------------ visszajatszas: egy tarolt futas ujra, masik modellel / a mai konfiguracioval
+    def run_head(rid):
+        if not RUN_ID_RX.match(rid):
+            raise HTTPException(422, {"errors": ["source must be a digest or incident id like incident-2026-11-25T10:30:57Z"]})
+        try:
+            rows = aiops.vl_query(f"_time:400d pipeline:ai kind:in(digest,incident) id:={json.dumps(rid)} | limit 1", timeout=20)
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        if not rows:
+            raise HTTPException(404, "unknown digest or incident id")
+        return rows[0]
+
+    def run_view(hd):
+        """Egy tarolt futas osszevetheto alakja (a visszajatszas eredmenyevel azonos mezok)."""
+        try:
+            issues = inc_issues(400 * 24, [hd["id"]]).get(hd["id"], [])
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        try:
+            side = json.loads(hd.get("side_issues") or "[]")
+        except ValueError:
+            side = []
+        return {"id": hd["id"], "kind": hd.get("kind"), "time": hd.get("_time"), "model": hd.get("model", ""), "window": hd.get("window", ""),
+                "alert": hd.get("alert", ""), "summary": re.sub(r"^\[AI \w+\] ", "", str(hd.get("_msg", ""))), "issues": issues,
+                "side_issues": side if isinstance(side, list) else [], "root_hypothesis": hd.get("root_hypothesis", ""),
+                "guard_notes": [x for x in str(hd.get("guard_notes", "")).split(" | ") if x],
+                "secs": hd.get("secs"), "prompt_tokens": hd.get("prompt_tokens"), "out_tokens": hd.get("out_tokens")}
+
+    def replay_worker(rid, job, model):
+        try:
+            cur = store.current("known")
+            known = aiops.Known(data=cur["content"]) if cur else aiops.Known(data={})
+            pool = aiops.EndpointPool(aiops.CFG["OLLAMA_URLS"], model)
+            res = aiops.run_job(job, known, pool, model=model, replay=True)
+            res.pop("job", None)
+            store.replay_finish(rid, result=res)
+        except aiops.ReplayError as e:
+            store.replay_finish(rid, error=str(e))
+        except Exception as e:  # noqa: BLE001 - a hatterszal hibaja a futas hibajakent latszik, nem tunik el
+            store.replay_finish(rid, error=f"{type(e).__name__}: {e}")
+
+    @app.get("/api/v1/replays/sources")
+    def replay_sources(days: int = Query(7, ge=1, le=30), _: Actor = Depends(read)):
+        """A visszajatszhato futasok (digest + incidens) az utolso `days` napbol, legujabb elol."""
+        days = min(days, REPLAY_MAX_DAYS)
+        try:
+            rows = aiops.vl_query(f"_time:{days}d pipeline:ai kind:in(digest,incident) | sort by (_time desc) | limit 200", timeout=20)
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, vl_down(e))
+        return [{"id": r.get("id", ""), "kind": r.get("kind", ""), "time": r.get("_time", ""), "model": r.get("model", ""),
+                 "max_severity": r.get("max_severity", ""), "issue_count": int(r.get("issue_count") or 0),
+                 "title": aiops.cut(str(r.get("alert") or re.sub(r"^\[AI \w+\] ", "", str(r.get("_msg", "")))), 140)}
+                for r in rows if RUN_ID_RX.match(str(r.get("id", "")))]
+
+    @app.get("/api/v1/replays")
+    def replay_list(limit: int = Query(50, ge=1, le=200), _: Actor = Depends(read)):
+        return {"running": store.replay_running(), "default_model": aiops.CFG["MODEL"], "max_days": REPLAY_MAX_DAYS, "replays": store.replay_list(limit)}
+
+    @app.get("/api/v1/replays/{rid}")
+    def replay_get(rid: int, _: Actor = Depends(read)):
+        r = store.replay_get(rid)
+        if r is None:
+            raise HTTPException(404, "unknown replay id")
+        r["original"] = run_view(run_head(r["source"]))
+        return r
+
+    @app.post("/api/v1/replays")
+    def replay_start(body: ReplayIn, who: Actor = Depends(admin)):
+        """Egy tarolt digest / incidens ujrafuttatasa ugyanarra az ablakra, a mai zajlistaval, topologiaval es vedelmekkel, kerésre masik
+        modellel. Nem ir a tarba, nem ertesit; egyszerre egy fut (a modellgep terhelese miatt). Hatterben fut: a GET /replays/{id} mutatja."""
+        model = (body.model or "").strip() or aiops.CFG["MODEL"]
+        if not MODEL_RX.match(model):
+            raise HTTPException(422, {"errors": ["model may contain letters, digits and . _ : / - only"]})
+        hd = run_head(body.source)
+        try:
+            job, notes = aiops.job_from_head(hd)
+        except aiops.ReplayError as e:
+            raise HTTPException(422, {"errors": [str(e)]})
+        t_from = dt.datetime.strptime(job["window_from"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+        if aiops.utcnow() - t_from > dt.timedelta(days=REPLAY_MAX_DAYS):
+            raise HTTPException(422, {"errors": [f"the window starts more than {REPLAY_MAX_DAYS} days ago: its log lines are no longer kept"]})
+        rid = store.replay_add(who.name, body.source, job["kind"], model, notes)
+        if rid is None:
+            raise HTTPException(409, "a replay is already running; wait for it to finish")
+        threading.Thread(target=replay_worker, args=(rid, job, model), name=f"replay-{rid}", daemon=True).start()
+        return {"id": rid, "notes": notes}
 
     # ------------------------------------------------------------ karbantartasi ablakok
     MAINT_KEEP_ENDED = dt.timedelta(days=7)

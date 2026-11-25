@@ -129,6 +129,9 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /maintenance` (read) | maintenance windows with state (active / upcoming / ended) and the devices each one actually covers |
 | `POST /maintenance` (admin) | `{"targets": ["device"], "hours": 2, "start"?: "...Z", "include_dependents": true, "note"?}`: start a window (default: now). A read token proposes the `maintenance` document via `POST /proposals` |
 | `POST /maintenance/{id}/end` (admin) | end an active window now, or cancel an upcoming one |
+| `GET /replays/sources` (read) | stored digests and incidents of the last days that can be replayed |
+| `POST /replays` (admin) | `{"source": "incident-...Z", "model"?: "name"}`: run a stored digest or incident again on the same window (today's noise list, topology and guards; the given or the current model). Runs in the background, one at a time; nothing is written or notified |
+| `GET /replays`, `GET /replays/{id}` (read) | replay runs; one run with the original and the replayed output side by side |
 | `POST /explain` (read) | `{"host", "ident", "message", "source": "syslog\|journald\|docker", "level"?, "hours": 24, "content": {...}?}`: why a log line is or is not in the model input, step by step (level filter, noise rule, snooze, known issue, volume cap in the live window); `hours: 0` checks the rules only |
 | `POST /test/topology` (read) | `{"text": "...", "content": {...}?}`: the devices found in the text and the topology section the model would get (uses unsaved `content` if given) |
 | `GET/PUT /config/detectors` (read/admin), `POST /proposals` with `"key":"detectors"` and `content` | the detectors document `{"detectors": [{id, name, query, mode: count\|absent, threshold, window_min, group_by, cooldown_min, action: triage\|direct\|none, severity, enabled, note}]}` (validated, versioned, hot reload) |
@@ -303,3 +306,12 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Resolved means at most low:** an issue the model marks `resolved` is capped at `low`, or at `medium` when a Kuma "down" or a critical/high alert names its host or service (a real outage that has recovered). Applies to digests and incidents.
 - **Why:** an alert about Home Assistant errors also reported an unrelated database warning on the NAS, and a resolved backup failure stayed `medium` in the digest. Replayed on a week of real incidents, 19 of 78 issues would have moved to the digest (mostly unrelated device and add-on warnings).
 - **Trade-off:** an unrelated `medium` problem found during an incident only shows up in the next daily digest; a resolved failure with lasting damage (e.g. lost data) is also capped at `low`/`medium`.
+
+### Replay & compare (v2.0.0-alpha.39)
+- **Same window, another model or today's rules:** the Replay & compare page (and `POST /api/v1/replays`) runs a stored digest or incident again on its original time window and shows the original and the new output side by side: issue count, highest severity, run time, summary, issues (an issue with no same-titled issue on the other side is crossed out), guard notes. The model can be any model served by a configured LLM endpoint; empty means the current one. An incident can be replayed from its own page ("Replay…").
+- **Safe to run:** nothing is written to the log store, no notification is sent, and the live state is not touched. One replay runs at a time (the model host is shared with the live triage); a restart marks a running replay as interrupted. Every start is audited.
+- **What is replayed:** incidents now store their alert details (labels, detector, correlation) in the incident head, so a replay retrieves the same evidence lines. Incidents stored before this version only have the alert texts: their evidence lines are not retrieved, and the correlation is recomputed from today's topology; the page says so.
+- **Why:** comparing two models or a prompt change on the same incidents was a manual job; it is also how a build-vs-buy evaluation compares outputs on the same data.
+- **Trade-off:** the replay uses today's noise list, topology and guards, so a difference can come from a configuration change as well as from the model. Windows older than the log retention (30 days, `REPLAY_MAX_DAYS`) cannot be replayed; if VictoriaLogs also has a disk cap, old lines may be gone sooner and the replay sees fewer of them. A replay takes the model host for as long as a live run does.
+
+![Replay & compare](docs/screenshots/replay.png)

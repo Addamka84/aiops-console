@@ -61,7 +61,13 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, inc TEXT NOT NULL, ts TEXT NOT NULL, actor TEXT NOT NULL,
                     kind TEXT NOT NULL, body TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS inc_events_inc ON inc_events (inc, id);
+                CREATE TABLE IF NOT EXISTS replays (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL, source TEXT NOT NULL,
+                    kind TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, done_ts TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '');
             """)
+            # a konzol ujraindulasa felbeszakitja a futo visszajatszast: ne maradjon orokre 'running'
+            self.db.execute("UPDATE replays SET status='error', error='interrupted by a restart', done_ts=? WHERE status='running'", (now_iso(),))
             self.db.commit()
 
     # ---- konfig-verziok
@@ -410,6 +416,56 @@ class Store:
         with self.lock:
             rows = self.db.execute("SELECT * FROM inc_events WHERE inc=? ORDER BY id", (inc,)).fetchall()
         return [{"ts": r["ts"], "actor": r["actor"], "kind": r["kind"], "body": json.loads(r["body"])} for r in rows]
+
+    # ---- visszajatszasok (egy tarolt digest / incidens ujrafuttatasa masik modellel / a mai konfiguracioval)
+    REPLAY_KEEP = 200
+
+    def replay_add(self, actor, source, kind, model, notes):
+        """-> az uj futas azonositoja, vagy None, ha mar fut egy (egyszerre egy: a modellgep terhelese miatt)."""
+        with self.lock:
+            if self.db.execute("SELECT COUNT(*) FROM replays WHERE status='running'").fetchone()[0]:
+                return None
+            cur = self.db.execute("INSERT INTO replays (ts, actor, source, kind, model, status, notes) VALUES (?,?,?,?,?, 'running', ?)",
+                                  (now_iso(), actor, source, kind, model, json.dumps(notes)))
+            self._audit(actor, "replay", f"{source} with model {model}")
+            self.db.execute("DELETE FROM replays WHERE id <= (SELECT MAX(id) FROM replays) - ?", (self.REPLAY_KEEP,))
+            self.db.commit()
+            return cur.lastrowid
+
+    def replay_finish(self, rid, result=None, error=""):
+        with self.lock:
+            self.db.execute("UPDATE replays SET status=?, done_ts=?, error=?, result=? WHERE id=?",
+                            ("error" if error else "done", now_iso(), str(error)[:500], json.dumps(result) if result is not None else "", rid))
+            self.db.commit()
+
+    def replay_running(self):
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM replays WHERE status='running'").fetchone()[0]
+
+    @staticmethod
+    def _replay(r, with_result=True):
+        d = {"id": r["id"], "ts": r["ts"], "actor": r["actor"], "source": r["source"], "kind": r["kind"], "model": r["model"],
+             "status": r["status"], "done_ts": r["done_ts"], "error": r["error"], "notes": json.loads(r["notes"] or "[]")}
+        res = json.loads(r["result"]) if r["result"] else None
+        if with_result:
+            d["result"] = res
+        elif res:
+            d["summary"] = {"issues": len(res.get("issues") or []), "skipped": res.get("skipped", ""),
+                            "max_severity": max((i.get("severity") for i in res.get("issues") or []),
+                                                key=lambda s: ("info", "low", "medium", "high", "critical").index(s)
+                                                if s in ("info", "low", "medium", "high", "critical") else -1, default="none"),
+                            "secs": res.get("secs")}
+        return d
+
+    def replay_list(self, limit=50):
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM replays ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [self._replay(r, with_result=False) for r in rows]
+
+    def replay_get(self, rid):
+        with self.lock:
+            r = self.db.execute("SELECT * FROM replays WHERE id=?", (int(rid),)).fetchone()
+        return self._replay(r) if r else None
 
     def _audit(self, actor, action, detail):
         self.db.execute("INSERT INTO audit (ts, actor, action, detail) VALUES (?,?,?,?)", (now_iso(), actor, action, detail))

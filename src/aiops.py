@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.38"
+__version__ = "2.0.0-alpha.39"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1107,13 +1107,13 @@ class EndpointPool:
                      "checked": e.get("checked", ""), "latency_ms": e.get("latency_ms"), "why": e.get("why", "")} for e in self.eps]
 
 
-def ollama_chat(ep_url, system, user):
+def ollama_chat(ep_url, system, user, model=None):
     """A modell hivasa; az API-tipus (CFG LLM_API) szerint Ollama vagy OpenAI-kompatibilis. Mindkettonel Ollama-alaku valasz:
-    {"message": {"content": ...}, "prompt_eval_count": n, "eval_count": n}."""
+    {"message": {"content": ...}, "prompt_eval_count": n, "eval_count": n}. A model (visszajatszasnal) felulirja a CFG MODEL-t."""
     if CFG["LLM_API"] == "openai":
-        return _openai_chat(ep_url, system, user)
+        return _openai_chat(ep_url, system, user, model)
     body = json.dumps({
-        "model": CFG["MODEL"], "stream": False, "think": False, "format": SCHEMA, "keep_alive": CFG["KEEP_ALIVE"],
+        "model": model or CFG["MODEL"], "stream": False, "think": False, "format": SCHEMA, "keep_alive": CFG["KEEP_ALIVE"],
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "options": {"temperature": 0, "seed": 1, "num_ctx": CFG["NUM_CTX"], "num_predict": 1500},
     }).encode("utf-8")
@@ -1135,8 +1135,8 @@ def ollama_chat(ep_url, system, user):
 _OPENAI_NO_SCHEMA = set()   # azok a vegpontok, amelyek a json_schema response_format-ot elutasitottak (json_object-re esunk vissza)
 
 
-def _openai_chat(ep_url, system, user):
-    base = {"model": CFG["MODEL"], "temperature": 0, "seed": 1, "max_tokens": 1500,
+def _openai_chat(ep_url, system, user, model=None):
+    base = {"model": model or CFG["MODEL"], "temperature": 0, "seed": 1, "max_tokens": 1500,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     schema_fmt = {"type": "json_schema", "json_schema": {"name": "aiops_output", "schema": SCHEMA, "strict": True}}
     attempts = [{"type": "json_object"}] if ep_url in _OPENAI_NO_SCHEMA else [schema_fmt, {"type": "json_object"}]
@@ -1344,14 +1344,22 @@ def item_evidence(job, known, t_from, t_to):
     return {"kept": kept, "suppressed": suppressed, "total": total, "prio": prio, "incomplete": incomplete}
 
 
-def run_job(job, known, pool, dry_run=False):
-    """Egy munka lefuttatasa. -> 'done' | 'retry' (nincs vegpont / hiba) | 'dropped'"""
+class ReplayError(Exception):
+    """Visszajatszas kozbeni hiba (nincs vegpont, a tar vagy a modell hibaja): a konzol a futas hibajakent mutatja."""
+
+
+def run_job(job, known, pool, dry_run=False, model=None, replay=False):
+    """Egy munka lefuttatasa. -> 'done' | 'retry' (nincs vegpont / hiba) | 'dropped'.
+    replay=True (visszajatszas): nincs tarba iras, ertesites, STATUS; az eredmeny (dict) a visszateresi ertek, hiba eseten ReplayError.
+    model: a CFG MODEL helyett ez a modell (a pool-t is ezzel kell letrehozni)."""
     t_from = dt.datetime.strptime(job["window_from"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     t_to = dt.datetime.strptime(job["window_to"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     evidence = alert_evidence(job, known, t_from, t_to) if job["kind"] == "incident" else None
     if evidence is not None and evidence["total"] > 0 and not evidence["kept"]:
         # Minden, a riasztast kivalto sor zaj / snooze / ismert ugy: nincs modellhivas, nincs ertesites (a konzol zajlistaja a riasztasra is hat).
         reason = f"all {evidence['suppressed']} triggering log lines are covered by noise rules, snoozes or known issues"
+        if replay:
+            return {"kind": job["kind"], "skipped": reason, "window": f"{iso(t_from)}..{iso(t_to)}", "model": model or CFG["MODEL"]}
         log(f"incidens kihagyva ({job.get('key', '')}): {reason}")
         if not dry_run:
             try:
@@ -1363,6 +1371,8 @@ def run_job(job, known, pool, dry_run=False):
         return "done"
     ep = pool.pick()
     if ep is None:
+        if replay:
+            raise ReplayError(f"no reachable LLM endpoint serves the model {model or CFG['MODEL']}")
         return "retry"
     extra = None
     system = SYSTEM_PROMPT
@@ -1397,14 +1407,18 @@ def run_job(job, known, pool, dry_run=False):
         raw = collect(t_from, t_to)
         user = redact(build_input(known, t_from, t_to, extra, raw=raw))   # a naplo titkai (token=, Bearer, URL-ben jelszo) ne keruljenek a modellhez
     except (OSError, ValueError) as e:
+        if replay:
+            raise ReplayError(f"VictoriaLogs query failed: {e}")
         log(f"VictoriaLogs lekerdezes sikertelen: {e}", key="vl_query")
         return "retry"
     stats = review_stats(known, raw, t_from, t_to)
     t0 = time.monotonic()
     try:
-        resp = ollama_chat(ep["url"], system, user)
+        resp = ollama_chat(ep["url"], system, user, model) if model else ollama_chat(ep["url"], system, user)
         out = redact_obj(parse_output(resp["message"]["content"]))   # a modell kimenete is (tarba, UI-ra, ertesitesbe kerul)
     except (OllamaError, ValueError, KeyError) as e:
+        if replay:
+            raise ReplayError(f"model call failed: {e}")
         pool.mark_down(ep, f"generalas sikertelen: {e}")
         return "retry"
     secs = round(time.monotonic() - t0, 1)
@@ -1428,7 +1442,7 @@ def run_job(job, known, pool, dry_run=False):
         issues, side, summary_in, focus_notes = guard_focus(issues, incident_anchors(job, evidence), summary_in)
         guard_notes += focus_notes
     result = {
-        "kind": job["kind"], "model": CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
+        "kind": job["kind"], "model": model or CFG["MODEL"], "endpoint": ep["url"], "window": f"{iso(t_from)}..{iso(t_to)}",
         "summary": consistent_summary(summary_in, issues, dropped, [ki["match_output"] for ki in known.issues],
                                       "== Known issues present" in user, changed and job["kind"] != "incident"), "all_clear": out["all_clear"] or not issues, "issues": issues, "dropped_known": len(dropped),
         "secs": secs, "prompt_tokens": resp.get("prompt_eval_count"), "out_tokens": resp.get("eval_count"),
@@ -1446,6 +1460,9 @@ def run_job(job, known, pool, dry_run=False):
         if job.get("correlation"):
             result["correlation"] = job["correlation"]
             result["correlated_alerts"] = len(job.get("items") or [])
+        result["job"] = job_meta(job)
+    if replay:
+        return result
     events = to_events(result)
     if dry_run:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1851,6 +1868,76 @@ def send_notification(payload):
     return False
 
 
+JOB_META_MAX = 8000    # az incidensfejbe mentett munkaleiras (visszajatszashoz) legnagyobb merete
+
+
+def job_meta(job):
+    """Az incidens-munka visszajatszashoz szukseges resze (riasztas-elemek cimkekkel es detektorral, korrelacio) JSON-kent; ha tul hosszu,
+    detektor nelkul, vegul csak a szovegekkel. -> str"""
+    items = [{"text": redact(str(it.get("text", "")))[:300], "alert_labels": it.get("alert_labels") or [], "detector": it.get("detector")}
+             for it in (job.get("items") or [job])][:12]
+    meta = {"key": job.get("key", ""), "items": items, "correlation": job.get("correlation")}
+    for strip in (None, "detector", "alert_labels"):
+        if strip:
+            meta["items"] = [dict(it, **{strip: None if strip == "detector" else []}) for it in meta["items"]]
+            meta["partial"] = True
+        s = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+        if len(s) <= JOB_META_MAX:
+            return s
+    return json.dumps({"key": meta["key"], "items": [{"text": it["text"][:120]} for it in items], "partial": True}, ensure_ascii=False)[:JOB_META_MAX]
+
+
+def job_from_head(head):
+    """Egy tarolt digest / incidens fejebol a visszajatszhato munka. -> (job, megjegyzesek). A regi (alpha.39 elotti) incidensfejben
+    nincs munkaleiras: ilyenkor csak a riasztas szovegei kerulnek be, a bizonyito sorok (cimkek, detektor) nem."""
+    kind = head.get("kind")
+    try:
+        w_from, w_to = str(head.get("window", "")).split("..")
+        for w in (w_from, w_to):
+            dt.datetime.strptime(w, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ReplayError("the stored run has no valid window")
+    if kind not in ("digest", "incident"):
+        raise ReplayError("only digests and incidents can be replayed")
+    job = {"kind": kind, "window_from": w_from, "window_to": w_to, "created": time.time(), "attempts": 0}
+    notes = []
+    if kind == "digest":
+        return job, notes
+    try:
+        meta = json.loads(head.get("job") or "null")
+    except ValueError:
+        meta = None
+    if isinstance(meta, dict) and isinstance(meta.get("items"), list) and meta["items"]:
+        items = [{"text": str(it.get("text", "")), "alert_labels": [lab for lab in (it.get("alert_labels") or []) if isinstance(lab, dict)],
+                  "detector": it.get("detector") if isinstance(it.get("detector"), dict) else None} for it in meta["items"] if isinstance(it, dict)]
+        if meta.get("partial"):
+            notes.append("the stored alert details were shortened: some evidence lines may not be retrieved")
+        corr = meta.get("correlation") if isinstance(meta.get("correlation"), dict) else None
+    else:
+        try:
+            texts = json.loads(head.get("alert_items") or "[]")
+        except ValueError:
+            texts = []
+        texts = [str(t) for t in texts if t] if isinstance(texts, list) else []
+        items = [{"text": t, "alert_labels": [], "detector": None} for t in (texts or [str(head.get("alert", ""))])]
+        corr = None
+        notes.append("incident stored before alpha.39: the alert labels are unknown, so the log lines behind the alert are not retrieved")
+        if TOPOLOGY:      # a korrelacio a mai topologiabol, a riasztas-szovegekbol ujraszamolva (az eredeti nincs tarolva)
+            try:
+                import correlation
+                citems = [{"ts": 0, "cis": correlation.resolve_cis(TOPOLOGY, [it["text"]])} for it in items]
+                if len(citems) > 1 or citems[0]["cis"]:
+                    corr = correlation.analyze(TOPOLOGY, citems)
+                    notes.append("the correlation was recomputed from today's topology")
+            except Exception as e:  # noqa: BLE001 - korrelacio nelkul is visszajatszhato
+                log(f"visszajatszas: a korrelacio ujraszamolasa sikertelen: {type(e).__name__}: {e}", key="replay_corr")
+    job.update(key=(meta or {}).get("key", "") if isinstance(meta, dict) else "", alert_text=str(head.get("alert", "")),
+               alert_labels=[lab for it in items for lab in it["alert_labels"]][:4], items=items, correlation=corr)
+    if len(items) == 1 and items[0]["detector"]:
+        job["detector"] = items[0]["detector"]
+    return job, notes
+
+
 def to_events(result):
     now = iso(utcnow())
     top = max_severity(result["issues"])
@@ -1871,6 +1958,8 @@ def to_events(result):
             head["alert_items"] = json.dumps(result["alert_items"], ensure_ascii=False)
         if result.get("side_issues"):
             head["side_issues"] = json.dumps(result["side_issues"], ensure_ascii=False)
+        if result.get("job"):
+            head["job"] = result["job"]
         if result.get("correlation"):
             c = result["correlation"]
             head["correlated_alerts"] = str(result.get("correlated_alerts", 1))

@@ -81,7 +81,7 @@ const isAdmin = () => S.role === 'admin';
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
 const TABS = [['status', 'Status', 'Monitor'], ['incidents', 'Incidents', 'Monitor'], ['history', 'History', 'Monitor'],
   ['known', 'Noise & known issues', 'Configure'], ['topology', 'Topology', 'Configure'], ['detectors', 'Detectors', 'Configure'], ['rules', 'Alert rules', 'Configure'], ['ingest', 'Severity & ingest', 'Configure'], ['maintenance', 'Maintenance', 'Configure'], ['settings', 'Settings', 'Configure'],
-  ['supervisor', 'Supervisor', 'AI'], ['proposals', 'Proposals', 'AI']];
+  ['supervisor', 'Supervisor', 'AI'], ['replay', 'Replay & compare', 'AI'], ['proposals', 'Proposals', 'AI']];
 
 // The version comes from the open health endpoint, so it is also shown on the sign-in page.
 async function loadVersion() {
@@ -136,7 +136,7 @@ async function render() {
     } catch (e) { return renderLogin(e.status === 401 ? 'Invalid token.' : e.message); }
   }
   refreshPendingCount();
-  const page = { status: pageStatus, incidents: pageIncidents, maintenance: pageMaint, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
+  const page = { status: pageStatus, incidents: pageIncidents, maintenance: pageMaint, known: pageKnown, topology: pageTopology, detectors: pageDetectors, rules: pageRules, ingest: pageIngest, supervisor: pageSupervisor, replay: pageReplay, settings: pageSettings, proposals: pageProposals, history: pageHistory }[S.tab] || pageStatus;
   try { await page(); } catch (e) {
     if (e.status === 401) { storage.del('token'); S.token = ''; S.role = null; return renderLogin('Session expired.'); }
     renderShell(h('div', { class: 'err' }, e.message));
@@ -241,7 +241,9 @@ function incDetailEl(d) {
       h('input', { placeholder: 'owner (optional)', value: x.owner, style: 'width:180px', oninput: (e) => { x.owner = e.target.value; } }),
       st !== 'acknowledged' && st !== 'resolved' ? h('button', { class: 'btn primary', onclick: () => incPost('/state', { state: 'acknowledged', owner: x.owner }, 'Acknowledged') }, 'Acknowledge') : null,
       st !== 'resolved' ? h('button', { class: 'btn', onclick: () => incPost('/state', { state: 'resolved', owner: x.owner }, 'Resolved') }, 'Resolve')
-        : h('button', { class: 'btn', onclick: () => incPost('/state', { state: 'open', owner: x.owner }, 'Reopened') }, 'Reopen')),
+        : h('button', { class: 'btn', onclick: () => incPost('/state', { state: 'open', owner: x.owner }, 'Reopened') }, 'Reopen'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn', title: 'Run this incident again on the same window, e.g. with another model', onclick: () => { S.rp.source = d.id; S.rp.sel = null; go('replay'); } }, 'Replay…')),
     h('h3', {}, 'Was the triage right?'),
     h('p', { class: 'muted small' }, 'Your answer is the measurement: the quality figures at the top come from it. The latest answer counts; earlier ones stay in the timeline.'),
     h('div', { class: 'row' }, sel('root_cause'), sel('severity'), sel('grouping')),
@@ -353,6 +355,88 @@ function drawMaint() {
       : h('p', { class: 'muted small' }, 'Admin token required to start or end a window.'),
     h('div', { class: 'panel' }, rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['State', 'Targets', 'Time', ''].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
       : h('p', { class: 'muted' }, 'No maintenance windows.')),
+  ]);
+}
+
+// ---------------------------------------------------------------- replay & compare (a stored run again on the same window)
+S.rp = { data: null, sources: [], source: '', model: '', sel: null, detail: null, error: '', poll: null };
+const RP_STATE_CLS = { running: 'b-pending', done: 'b-approved', error: 'b-rejected' };
+const SEV_ORDER = ['info', 'low', 'medium', 'high', 'critical'];
+const maxSev = (issues) => (issues || []).reduce((m, i) => (SEV_ORDER.indexOf(i.severity) > SEV_ORDER.indexOf(m) ? i.severity : m), 'none');
+const normTitle = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+async function pageReplay() {
+  const x = S.rp;
+  try {
+    const [d, src] = await Promise.all([api('GET', '/api/v1/replays'), isAdmin() ? api('GET', '/api/v1/replays/sources?days=7') : Promise.resolve([])]);
+    x.data = d; x.sources = src; x.error = '';
+    if (!x.source && src.length) x.source = src[0].id;
+    if (x.sel) x.detail = await api('GET', '/api/v1/replays/' + x.sel);
+  } catch (e) { x.error = e.message; }
+  drawReplay();
+  clearTimeout(x.poll);
+  const busy = (x.data && x.data.running) || (x.detail && x.detail.status === 'running');
+  if (busy && S.tab === 'replay') x.poll = setTimeout(() => { if (S.tab === 'replay') pageReplay(); }, 4000);
+}
+async function rpStart() {
+  const x = S.rp;
+  if (!x.source) { toast('Choose a run to replay', true); return; }
+  try {
+    const r = await api('POST', '/api/v1/replays', { source: x.source, model: x.model.trim() || null });
+    x.sel = r.id; toast('Replay started');
+  } catch (e) { toast(e.message, true); }
+  pageReplay();
+}
+async function rpSelect(id) { S.rp.sel = id; await pageReplay(); const d = document.getElementById('rp-detail'); if (d) d.scrollIntoView({ block: 'start' }); }
+function rpSide(title, r, otherTitles) {
+  const issues = r.issues || [];
+  return h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, title),
+    h('p', { class: 'muted small' }, [r.model, r.secs ? r.secs + ' s' : '', r.prompt_tokens ? r.prompt_tokens + ' + ' + r.out_tokens + ' tokens' : ''].filter(Boolean).join(' · ')),
+    r.skipped ? h('div', { class: 'note small' }, 'No model call: ' + r.skipped) : h('p', {}, r.summary || ''),
+    issues.length ? h('ul', { class: 'small' }, issues.map((i) => h('li', { class: otherTitles.has(normTitle(i.title)) ? '' : 'gone', title: otherTitles.has(normTitle(i.title)) ? '' : 'Not on the other side' },
+      sevBadge(i.severity), ' ' + i.title + (i.status ? ' · ' + i.status : '') + ((i.hosts || []).length ? ' (' + (Array.isArray(i.hosts) ? i.hosts.join(', ') : i.hosts) + ')' : ''))))
+      : h('p', { class: 'muted small' }, 'No issues.'),
+    (r.side_issues || []).length ? h('p', { class: 'muted small' }, (r.side_issues || []).length + ' unrelated issue(s) left to the daily digest') : null,
+    (r.guard_notes || []).length ? h('div', { class: 'note small' }, 'Guards: ' + r.guard_notes.join('; ')) : null,
+    h('details', {}, h('summary', { class: 'muted small' }, 'Issue details'), issueList(issues)));
+}
+function rpDetailEl(d) {
+  if (d.status === 'running') return h('div', { class: 'panel', id: 'rp-detail' }, h('p', {}, 'Running ' + d.source + ' with ' + d.model + '… (a model call can take a few minutes)'));
+  if (d.status === 'error') return h('div', { class: 'panel', id: 'rp-detail' }, h('div', { class: 'err' }, 'Replay failed: ' + d.error));
+  const o = d.original, r = d.result || {};
+  const ot = new Set((o.issues || []).map((i) => normTitle(i.title))), rt = new Set((r.issues || []).map((i) => normTitle(i.title)));
+  const delta = [(o.issues || []).length + ' → ' + (r.issues || []).length + ' issue(s)', 'max severity ' + maxSev(o.issues) + ' → ' + maxSev(r.issues)];
+  if (o.secs && r.secs) delta.push(o.secs + ' s → ' + r.secs + ' s');
+  return h('div', { id: 'rp-detail' },
+    h('div', { class: 'panel' }, h('div', { class: 'row' }, h('strong', {}, d.source), h('span', { class: 'muted small' }, o.window), h('span', { class: 'grow' }),
+      h('button', { class: 'icon', title: 'Close', onclick: () => { S.rp.sel = null; S.rp.detail = null; drawReplay(); } }, '×')),
+      o.alert ? h('p', { class: 'small mono muted' }, o.alert) : null,
+      h('p', {}, h('strong', {}, 'Change: '), delta.join(' · ')),
+      d.notes.length ? h('div', { class: 'note small' }, h('ul', { style: 'margin:0;padding-left:18px' }, d.notes.map((n) => h('li', {}, n)))) : null,
+      h('p', { class: 'muted small' }, 'Crossed-out issues have no issue with the same title on the other side. The replay uses today\'s noise list, topology and guards, so a difference can also come from a configuration change since the original run.')),
+    h('div', { class: 'cmp' }, rpSide('Original (' + fmtTime(o.time) + ')', o, rt), rpSide('Replay (' + fmtTime(d.done_ts) + ')', r, ot)));
+}
+function drawReplay() {
+  const x = S.rp, d = x.data;
+  const rows = d ? d.replays.map((r) => h('tr', { class: r.id === x.sel ? 'sel' : '', style: 'cursor:pointer', onclick: () => rpSelect(r.id) },
+    h('td', { class: 'nowrap small' }, fmtTime(r.ts)), h('td', { class: 'small mono' }, r.source), h('td', { class: 'small' }, r.model),
+    h('td', {}, h('span', { class: 'badge ' + (RP_STATE_CLS[r.status] || 'b-unknown') }, r.status)),
+    h('td', { class: 'small' }, r.summary ? (r.summary.skipped ? 'skipped' : r.summary.issues + ' issue(s), max ' + r.summary.max_severity + (r.summary.secs ? ' · ' + r.summary.secs + ' s' : '')) : r.error ? h('span', { class: 'muted' }, r.error.slice(0, 80)) : '-'))) : [];
+  renderShell([
+    h('h2', {}, 'Replay & compare'),
+    h('p', { class: 'muted' }, 'Run a stored digest or incident again on the same time window, with the current or another model, and compare the two outputs side by side. Useful before changing the model or a prompt. Nothing is written to the log store and no notification is sent; one replay runs at a time.'),
+    x.error ? h('div', { class: 'err' }, x.error) : null,
+    isAdmin() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New replay'),
+      h('div', { class: 'row' },
+        h('select', { class: 'grow', onchange: (e) => { x.source = e.target.value; } },
+          x.source && !x.sources.some((s) => s.id === x.source) ? h('option', { value: x.source, selected: true }, x.source) : null,
+          x.sources.map((s) => h('option', { value: s.id, selected: s.id === x.source }, fmtTime(s.time) + ' · ' + s.kind + ' · ' + (s.max_severity || '-') + ' · ' + s.title))),
+        h('input', { placeholder: 'model (empty = ' + (d ? d.default_model : 'current') + ')', style: 'width:220px', value: x.model, oninput: (e) => { x.model = e.target.value; } }),
+        h('button', { class: 'btn primary', disabled: !!(d && d.running), onclick: rpStart }, d && d.running ? 'A replay is running…' : 'Replay')),
+      h('p', { class: 'muted small' }, 'The model must be available on one of the configured LLM endpoints. Windows older than ' + (d ? d.max_days : 30) + ' days cannot be replayed: their log lines are no longer kept.'))
+      : h('p', { class: 'muted small' }, 'Admin token required to start a replay.'),
+    x.sel && x.detail ? rpDetailEl(x.detail) : null,
+    h('div', { class: 'panel' }, rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Started', 'Source', 'Model', 'State', 'Result'].map((t) => h('th', {}, t)))), h('tbody', {}, rows))
+      : h('p', { class: 'muted' }, 'No replays yet.')),
   ]);
 }
 
