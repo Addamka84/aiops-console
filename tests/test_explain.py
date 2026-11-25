@@ -30,7 +30,7 @@ def outcome(r):
 
 class RuleTests(unittest.TestCase):
     def test_noise_rule_named(self):
-        r = aiops.explain_line(known(), "homesrv", "avahi-daemon", "Joining mDNS multicast group on interface eth0.IPv4 with address 192.168.31.2.",
+        r = aiops.explain_line(known(), "homesrv", "avahi-daemon", "Joining mDNS multicast group on interface eth0.IPv4 with address 192.0.2.10.",
                                "syslog", "notice", now=NOW)
         self.assertEqual(outcome(r), "suppressed")
         self.assertIn("noise rule #1", r["verdict"]["summary"])
