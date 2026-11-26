@@ -92,7 +92,7 @@ class StaleGuardTests(unittest.TestCase):
     def test_timed_rows_skip_noise(self):
         k = aiops.Known()
         raw = {"a": [], "b": [], "d": [{"host": "homesrv3", "appname": "immich_server", "_msg": "Error x", "hits": "3", "last": "2026-11-24T04:02:00.5Z"}]}
-        self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2), 3)])
+        self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2), 3, None)])
 
 
 class Alpha33Tests(unittest.TestCase):

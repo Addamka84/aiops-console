@@ -745,7 +745,8 @@ def create_app(rt, tokens=None):
             by.setdefault(str(r.get("parent", "")), []).append({
                 "title": r.get("title", ""), "severity": r.get("severity", ""), "status": r.get("status", ""),
                 "hosts": [x.strip() for x in str(r.get("hosts", "")).split(",") if x.strip()],
-                "evidence": r.get("evidence", ""), "likely_cause": r.get("likely_cause", ""), "suggested_action": r.get("suggested_action", "")})
+                "evidence": r.get("evidence", ""), "likely_cause": r.get("likely_cause", ""), "suggested_action": r.get("suggested_action", ""),
+                "cause_basis": r.get("cause_basis", ""), "cause_quote": r.get("cause_quote", "")})
         for v in by.values():
             v.sort(key=lambda i: -SEV_ORDER.get(i["severity"], -1))
         return by

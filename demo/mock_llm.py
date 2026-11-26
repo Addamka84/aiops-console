@@ -28,6 +28,7 @@ def answer(user):
             "evidence": f"Topology correlation: {k} of {n} affected assets are explained by {root} (confidence {c})"
                         + (f"; about {imp['n']} downstream items potentially impacted" if imp else "") + ". [canned demo-model text, not a language-model inference]",
             "likely_cause": f"{root} is unreachable or down; the dependent assets alert because they need it. (Rule-based wording of the correlator's hypothesis.)",
+            "cause_quote": "",
             "suggested_action": f"Check {root} first (power, uplink, hypervisor/switch console); the dependent alerts should clear when it recovers.",
         }],
     }

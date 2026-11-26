@@ -163,6 +163,15 @@ function renderLogin(msg) {
 }
 
 // ---------------------------------------------------------------- status
+// A modell altal irt ok megalapozasa (guard_cause): log = a bemenet egy idezett sora mutatja; inferred = kovetkeztetes; unknown = ismeretlen.
+const CAUSE_BASIS = { log: ['from log', 'sev-info', 'A quoted input line shows this cause'],
+  symptom: ['symptom only', 'sev-medium', 'The quoted line only shows that it failed, not why: the cause is not confirmed'],
+  inferred: ['inferred','sev-medium', 'No input line shows this cause: it is the model\'s inference, verify it'],
+  unknown: ['unknown', 'sev-low', 'The logs do not show the cause'] };
+function causeBadge(b) {
+  const c = CAUSE_BASIS[b];
+  return c ? [h('span', { class: 'badge ' + c[1], title: c[2] }, c[0]), ' '] : null;
+}
 function issueList(issues) {
   if (!issues || !issues.length) return h('p', { class: 'muted' }, 'No issues reported.');
   return issues.map((i) => h('div', { class: 'issue' },
@@ -170,7 +179,8 @@ function issueList(issues) {
     h('details', {}, h('summary', { class: 'muted small' }, 'Details'),
       h('dl', { class: 'kv small' },
         h('dt', {}, 'Evidence'), h('dd', {}, i.evidence || '-'),
-        h('dt', {}, 'Likely cause'), h('dd', {}, i.likely_cause || '-'),
+        h('dt', {}, 'Likely cause'), h('dd', {}, causeBadge(i.cause_basis), i.likely_cause || '-'),
+        i.cause_quote ? [h('dt', {}, 'Cause line'), h('dd', {}, h('code', {}, i.cause_quote))] : null,
         h('dt', {}, 'Suggested action'), h('dd', {}, i.suggested_action || '-')))));
 }
 function resultCard(title, r) {
