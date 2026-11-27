@@ -100,7 +100,8 @@ jobs:
             --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 1 aiops-console:ci
       - name: summary
         if: always()
-        run: echo "### Image scan (report-only): ${{ steps.trivy.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "### Image scan (report-only): ${{ steps.trivy.outcome }}" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
