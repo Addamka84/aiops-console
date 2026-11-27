@@ -175,6 +175,7 @@ Standard library + FastAPI/uvicorn. The container runs as a non-root user; `/dat
 ## Release
 Push a tag `vX.Y.Z`: GitHub Actions runs the tests and publishes `ghcr.io/<owner>/aiops-console:vX.Y.Z` (and `latest`; a pre-release tag such as `v2.0.0-alpha.1` never moves `latest`).
 Make the package public once (GitHub → Packages → Package settings) so the host can pull it without credentials.
+The `publish` job runs only after the tests **and** the `image` job: the image is built and started read-only, `/api/v1/health` must answer with the version in the code, and the process must not run as root. On a tag build a test also checks that the tag names the version in `src/aiops.py` and the shipped compose files.
 
 ### Supervisor with Ollama
 Use `SUPERVISOR_API=ollama` (native `/api/chat`) for Ollama: the OpenAI-compatible `/v1` endpoint cannot set the context window and Ollama silently uses the
@@ -340,3 +341,8 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **What stays admin-only:** writing and rolling back configuration (noise list, snoozes, topology, detectors, rules, settings, ingest), approving or rejecting proposals, the rule sync, the supervisor run, the test notification and reading the audit log. The operator can still *propose* such changes, like the read token.
 - **Compatibility:** without `CONSOLE_OPERATOR_TOKEN` nothing changes. If two roles get the same token, the higher role wins and a warning is logged.
 - **Trade-off:** a maintenance window suppresses alerts on its targets, so an operator can silence a device for up to a week; the window is audited and expires by itself, but it is not a proposal. Snoozes stay admin-only because they change the noise configuration (up to 90 days).
+
+### Release safety and CI gates (v2.0.0-alpha.43)
+- **Why:** a failed tag build left no image behind while the release looked done, and a stale image tag in a compose file was only caught by hand.
+- **What changed:** no application behaviour. CI now has a container smoke test before publishing (read-only start, health, version, non-root) and a version-consistency test; `publish` depends on both. Lint (ruff `E9,F`), `node --check` on the UI, `pip-audit`, coverage and a Trivy image scan run on every push but only **report** for now (see the run summary); they will become blocking once the existing findings are cleared.
+- **Trade-off:** CI takes a few minutes longer (image build and scan on every push).

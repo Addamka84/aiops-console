@@ -1,6 +1,7 @@
 name: image
 
 # Test on every push / PR; publish the image to GHCR when a version tag (v*) is pushed.
+# The publish job runs only if the tests AND the container smoke test passed.
 on:
   push:
     branches: [main]
@@ -20,11 +21,90 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
+      # on a tag build, test_version_consistency also checks that the tag names the version in the code
       - run: python -m unittest discover -s tests
+
+  # Report-only for now: findings show in the run summary, they do not fail the build.
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install -r requirements-dev.txt ruff==0.17.5 pip-audit==2.10.1 coverage==7.17.3
+      - id: ruff
+        name: lint (ruff E9,F)
+        continue-on-error: true
+        run: ruff check --select E9,F --output-format github src tests evalkit demo
+      - id: ui
+        name: UI syntax (node --check)
+        continue-on-error: true
+        run: node --check src/ui/app.js
+      - id: audit
+        name: dependency audit (pip-audit)
+        continue-on-error: true
+        run: pip-audit -r requirements.txt
+      - id: coverage
+        name: coverage
+        continue-on-error: true
+        run: |
+          coverage run --source=src -m unittest discover -s tests
+          coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### Quality gates (report-only)"
+            echo "| check | outcome |"
+            echo "|---|---|"
+            echo "| ruff E9,F | ${{ steps.ruff.outcome }} |"
+            echo "| node --check app.js | ${{ steps.ui.outcome }} |"
+            echo "| pip-audit | ${{ steps.audit.outcome }} |"
+            echo "| coverage run | ${{ steps.coverage.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Build the image and start it before anything is pushed: a container that does not come up never reaches GHCR.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: docker build -t aiops-console:ci .
+      - name: smoke test (starts read-only, health answers, version matches the code, runs as non-root)
+        run: |
+          ver=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/aiops.py)
+          docker run -d --name smoke --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
+            -v smoke_data:/data -e TZ=UTC -e VL_URL=http://127.0.0.1:9 -e OLLAMA_URLS=http://127.0.0.1:9 \
+            -e CONSOLE_ADMIN_TOKEN=ci-smoke-admin-token-0123456789-abcdefghij \
+            -p 127.0.0.1:8095:8095 aiops-console:ci
+          body=""
+          for i in $(seq 1 30); do
+            body=$(curl -fsS http://127.0.0.1:8095/api/v1/health 2>/dev/null) && break
+            sleep 2
+          done
+          sleep 5
+          docker logs smoke 2>&1 | tail -n 40
+          echo "health: $body"
+          echo "$body" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('ok') is True and d.get('version') == sys.argv[1], d" "$ver"
+          test "$(docker inspect -f '{{.State.Running}}' smoke)" = true
+          test "$(docker exec smoke id -u)" = 10001
+      - id: trivy
+        name: image scan (Trivy, HIGH/CRITICAL with a fix; report-only)
+        continue-on-error: true
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image \
+            --severity HIGH,CRITICAL --ignore-unfixed --no-progress --exit-code 1 aiops-console:ci
+      - name: summary
+        if: always()
+        run: echo "### Image scan (report-only): ${{ steps.trivy.outcome }}" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
