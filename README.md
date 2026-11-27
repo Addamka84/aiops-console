@@ -106,6 +106,11 @@ The UI is three static files (no build step, no external resources, strict CSP; 
 Interactive API docs: `http://<host>:8095/docs`.
 
 ## API (all under `/api/v1`, `Authorization: Bearer <token>`)
+Three roles, each with the rights of the ones below it: **read** (`CONSOLE_READ_TOKEN`: read, test, create proposals), **operator**
+(`CONSOLE_OPERATOR_TOKEN`, optional: incident state / notes / feedback, replays, maintenance windows, dismissing findings, a manual digest)
+and **admin** (`CONSOLE_ADMIN_TOKEN`: everything, including config writes, approvals, rule sync, the supervisor and the audit log).
+Endpoints marked (operator) below accept an operator or admin token.
+
 | | |
 |---|---|
 | `GET /status` (read) | endpoints, queue, last digest/incident, effective settings, next digest time |
@@ -118,19 +123,19 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /stats/volume?hours=24&by=pipeline` (read) | log message counts per time bucket for a stacked chart; `hours` 6/24/72/168, `by` `pipeline`/`host` (60 s cache) |
 | `GET /stats/runs?kind=digest&limit=14` (read) | recent checks with their "what was reviewed" statistics (from the `pipeline:ai` events in VictoriaLogs) |
 | `GET /novelty?status=open&limit=100` (read) | new-pattern / rate-spike findings plus the detector state (baseline size, last scan, errors); `status` `open`/`dismissed`/`all` |
-| `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (admin) | mark findings as reviewed |
+| `POST /novelty/{id}/dismiss`, `POST /novelty/dismiss-all` (operator) | mark findings as reviewed |
 | `GET/PUT /config/topology` (read/admin), `POST /proposals` with `"key":"topology"` and `content` | the topology document `{"assets": [...]}` (validated: unique ids/names/aliases/IPs, references must exist); versioned like the other documents |
 | `GET /incidents?hours=168&state=unresolved\|all\|open\|acknowledged\|resolved` (read) | AI-triaged incidents (from VictoriaLogs) with the console-side state, owner and latest feedback |
 | `GET /incidents/{id}` (read) | one incident: grouped alerts, issues, guard notes, timeline (state changes, notes, feedback) |
-| `POST /incidents/{id}/state` (admin) | `{"state": "open\|acknowledged\|resolved", "owner"?}` |
-| `POST /incidents/{id}/notes` (admin) | `{"text": "..."}` (secrets are redacted) |
-| `POST /incidents/{id}/feedback` (admin) | `{"root_cause": "correct\|wrong\|unsure\|n/a", "severity": "right\|too_high\|too_low", "grouping": "right\|should_split\|should_merge\|n/a", "comment"?}`; the latest one counts |
+| `POST /incidents/{id}/state` (operator) | `{"state": "open\|acknowledged\|resolved", "owner"?}` |
+| `POST /incidents/{id}/notes` (operator) | `{"text": "..."}` (secrets are redacted) |
+| `POST /incidents/{id}/feedback` (operator) | `{"root_cause": "correct\|wrong\|unsure\|n/a", "severity": "right\|too_high\|too_low", "grouping": "right\|should_split\|should_merge\|n/a", "comment"?}`; the latest one counts |
 | `GET /incidents/quality?days=30` (read) | triage quality from the feedback: root cause correct, severity right, grouping right (rated / good / rate) |
 | `GET /maintenance` (read) | maintenance windows with state (active / upcoming / ended) and the devices each one actually covers |
-| `POST /maintenance` (admin) | `{"targets": ["device"], "hours": 2, "start"?: "...Z", "include_dependents": true, "note"?}`: start a window (default: now). A read token proposes the `maintenance` document via `POST /proposals` |
-| `POST /maintenance/{id}/end` (admin) | end an active window now, or cancel an upcoming one |
+| `POST /maintenance` (operator) | `{"targets": ["device"], "hours": 2, "start"?: "...Z", "include_dependents": true, "note"?}`: start a window (default: now). A read token proposes the `maintenance` document via `POST /proposals` |
+| `POST /maintenance/{id}/end` (operator) | end an active window now, or cancel an upcoming one |
 | `GET /replays/sources` (read) | stored digests and incidents of the last days that can be replayed |
-| `POST /replays` (admin) | `{"source": "incident-...Z", "model"?: "name"}`: run a stored digest or incident again on the same window (today's noise list, topology and guards; the given or the current model). Runs in the background, one at a time; nothing is written or notified |
+| `POST /replays` (operator) | `{"source": "incident-...Z", "model"?: "name"}`: run a stored digest or incident again on the same window (today's noise list, topology and guards; the given or the current model). Runs in the background, one at a time; nothing is written or notified |
 | `GET /replays`, `GET /replays/{id}` (read) | replay runs; one run with the original and the replayed output side by side |
 | `POST /explain` (read) | `{"host", "ident", "message", "source": "syslog\|journald\|docker", "level"?, "hours": 24, "content": {...}?}`: why a log line is or is not in the model input, step by step (level filter, noise rule, snooze, known issue, volume cap in the live window); `hours: 0` checks the rules only |
 | `POST /test/topology` (read) | `{"text": "...", "content": {...}?}`: the devices found in the text and the topology section the model would get (uses unsaved `content` if given) |
@@ -141,7 +146,7 @@ Interactive API docs: `http://<host>:8095/docs`.
 | `GET /snoozes` (read) | temporary mutes with `active` and `remaining_s` |
 | `POST /snoozes` (admin) | `{"regex": "...", "hours": 24, "note": "..."}`: mute now (1 h to 90 days). A read token proposes it instead: `{"key":"known","comment":"...","patch":{"add_snoozes":[{"regex":"...","hours":24}]}}` |
 | `DELETE /snoozes/{id}` (admin) | un-mute / remove an expired entry |
-| `POST /jobs/digest` / `POST /jobs/notify-test` (admin) | run a digest now / send a test notification |
+| `POST /jobs/digest` (operator) / `POST /jobs/notify-test` (admin) | run a digest now / send a test notification |
 | `GET /supervisor` (read), `GET /supervisor/runs?limit=20` (read), `POST /supervisor/run` (admin) | Auto AI Supervisor: state (mode, model, token budget, next run; never the key), run reports, run now (409 when off) |
 | `GET /rules/preview` (read), `POST /rules/preview` (read) | the vmalert rule file rendered from the saved (or a posted unsaved) `rules` document, or the validation errors |
 | `GET /rules/sync` (read), `POST /rules/sync` (admin) | state of the release to vmalert (last attempt, released revision, the live vmalert view of the managed groups); re-apply now (409 when sync is off) |
@@ -283,7 +288,7 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Incidents page:** every AI-triaged incident with its state (open, acknowledged, resolved), owner and feedback; filter by state and window. The detail view shows the grouped alerts, the root-cause hypothesis, the issues, what the guards changed, and a timeline (alerting, AI triage, state changes, notes, feedback).
 - **Feedback is the measurement:** an admin answers three questions per incident: was the root cause correct, was the severity right (or too high / too low), was the grouping right (or should it be split / merged). The latest answer counts; the page shows the rates for the last 30 days (`GET /api/v1/incidents/quality`). These are the labels a build-vs-buy comparison needs, collected in the tool itself.
 - **Storage:** the incident stays in VictoriaLogs (`pipeline:ai`); the console keeps only the state, notes and feedback (SQLite, audited). New incidents also store their grouped alerts (`alert_items`); older ones show the first alert.
-- **Trade-off:** changing the state, adding notes and giving feedback needs the admin token; there is no separate operator role yet.
+- **Trade-off:** changing the state, adding notes and giving feedback needs an operator or admin token (the operator role came in alpha.42).
 - **Fix:** "Why isn't it shown?" no longer calls a line "too rare" when the typed text differs slightly from the logged one (e.g. a device name); it uses the closest collected pattern and says so.
 
 ![Incidents](docs/screenshots/incidents.png)
@@ -328,3 +333,10 @@ Open (not code fixes): authentication (SSO/OIDC, TLS), alert ingestion authentic
 - **Also:** "Failed to refresh device state ..." (Tuya) and the alert text itself (`[FIRING] ... LE ALLT`) now count as *symptom only* cause lines.
 - **Measured on real runs (replayed):** the CS 1.6 monitor incident moved from the monitoring host to the game server; in two daily digests the game-server and a speaker monitor were attributed to their targets; issues without a monitor were unchanged.
 - **Trade-off:** it relies on the topology. A monitor whose name and message match no device stays where it was, and a monitor named after one device while checking another is attributed to the named one. Names shorter than 5 letters are used only when they directly name a device (a group such as `Game` is skipped).
+
+### Operator role (v2.0.0-alpha.42)
+- **Why:** with only read and admin, whoever works the incidents (sets the state, writes notes, rates the triage, opens a maintenance window) needed the admin token, which can also rewrite the noise list, the rules and the settings. In a team that is too much for daily work.
+- **What it allows:** a third token, `CONSOLE_OPERATOR_TOKEN` (optional). It has every read right plus: incident state, notes and feedback; replays; maintenance windows (at most 168 h, as before) and ending them; dismissing novelty findings; a manual digest. Every action is in the audit log under `operator:<actor>`.
+- **What stays admin-only:** writing and rolling back configuration (noise list, snoozes, topology, detectors, rules, settings, ingest), approving or rejecting proposals, the rule sync, the supervisor run, the test notification and reading the audit log. The operator can still *propose* such changes, like the read token.
+- **Compatibility:** without `CONSOLE_OPERATOR_TOKEN` nothing changes. If two roles get the same token, the higher role wins and a warning is logged.
+- **Trade-off:** a maintenance window suppresses alerts on its targets, so an operator can silence a device for up to a week; the window is audited and expires by itself, but it is not a proposal. Snoozes stay admin-only because they change the noise configuration (up to 90 days).

@@ -1,8 +1,11 @@
 """A konzol REST API-ja (FastAPI). Az OpenAPI-leiras: /docs.
 
 Szerepkorok (Bearer token, kornyezeti valtozokbol; a tokenek nem kerulnek konfigtarba/repoba):
-- read  (CONSOLE_READ_TOKEN):  olvasas, regex-teszt, JAVASLAT letrehozasa (nem modosit eles konfigot)
-- admin (CONSOLE_ADMIN_TOKEN): minden, kozvetlen iras, javaslat jovahagyasa, feladatok inditasa, audit
+- read     (CONSOLE_READ_TOKEN):     olvasas, regex-teszt, JAVASLAT letrehozasa (nem modosit eles konfigot)
+- operator (CONSOLE_OPERATOR_TOKEN): a read joga + napi uzemeltetes: incidens allapota / jegyzet / visszajelzes, visszajatszas,
+                                     karbantartasi ablak (max. 168 ora), ujdonsag-leletek lezarasa, kezi napi osszefoglalo. Konfigot (zajlista,
+                                     snooze, topologia, szabalyok, beallitasok) NEM ir, javaslatot NEM hagy jova, auditot nem olvas.
+- admin    (CONSOLE_ADMIN_TOKEN):    minden, kozvetlen iras, javaslat jovahagyasa, feladatok inditasa, audit
 Token nelkul (egyik sincs beallitva) a vedett vegpontok 503-at adnak.
 """
 import collections
@@ -35,6 +38,7 @@ from redact import redact
 from store import StoreError
 
 ACTOR_RX = re.compile(r"[^A-Za-z0-9_.-]")
+ROLES = ("read", "operator", "admin")   # novekvo jogosultsag: minden szerepkor a kisebbek jogait is birja
 MAX_BODY = 262144          # a kerestest legfeljebb ennyi bajt (a legnagyobb dokumentum, a topologia, ennel joval kisebb)
 AUTH_FAIL_LIMIT = 10       # hibas tokenes proba / perc / kliens-cim: efelett 429 (a helyes tokenes keres tovabbra is atmegy)
 MAX_PENDING_PER_ACTOR = 100  # egy SZEREPKOR (read / admin) legfeljebb ennyi fuggo javaslatot hagyhat (a cimke szabadon valaszthato: audit M6)
@@ -168,7 +172,8 @@ def next_digest():
 
 def create_app(rt, tokens=None):
     if tokens is None:
-        tokens = {"read": os.environ.get("CONSOLE_READ_TOKEN", "").strip(), "admin": os.environ.get("CONSOLE_ADMIN_TOKEN", "").strip()}
+        tokens = {"read": os.environ.get("CONSOLE_READ_TOKEN", "").strip(), "operator": os.environ.get("CONSOLE_OPERATOR_TOKEN", "").strip(),
+                  "admin": os.environ.get("CONSOLE_ADMIN_TOKEN", "").strip()}
     store = rt.store
     noisemodel.ADVISOR.attach(store)
     app = FastAPI(title="aiops-console", version="1.0", description="Configuration and control API of the aiops service.")
@@ -176,6 +181,9 @@ def create_app(rt, tokens=None):
     for name_, tok_ in tokens.items():
         if tok_ and len(tok_) < 32:
             aiops.log(f"konzol: a(z) {name_} token rovid ({len(tok_)} jel): legalabb 32 veletlen jelet hasznalj", key=("console_short_token", name_))
+    _set = [t for t in tokens.values() if t]
+    if len(_set) != len(set(_set)):     # azonos tokennel a magasabb szerepkor nyer: a gyengebbnek szant token is admin/operator lenne
+        aiops.log("konzol: ket szerepkornek azonos a tokenje: a magasabb szerepkor ervenyes, adj kulon tokent", key="console_dup_token")
     fails = collections.defaultdict(collections.deque)   # kliens-cim -> a hibas probak ideje (monoton, mp)
 
     def failure(ip):
@@ -191,27 +199,27 @@ def create_app(rt, tokens=None):
 
     def authed(need):
         def dep(request: Request, authorization: str | None = Header(None), x_actor: str | None = Header(None)):
-            if not (tokens.get("read") or tokens.get("admin")):
-                raise HTTPException(503, "no API tokens configured (set CONSOLE_READ_TOKEN / CONSOLE_ADMIN_TOKEN)")
+            if not any(tokens.get(r) for r in ROLES):
+                raise HTTPException(503, "no API tokens configured (set CONSOLE_READ_TOKEN / CONSOLE_OPERATOR_TOKEN / CONSOLE_ADMIN_TOKEN)")
             got = (authorization or "")[7:].strip() if (authorization or "").lower().startswith("bearer ") else ""
             gb = got.encode("utf-8", "replace")      # a compare_digest nem-ASCII str-re TypeError-t dobna (500)
             role = None
             if got:
-                if tokens.get("admin") and hmac.compare_digest(gb, tokens["admin"].encode("utf-8", "replace")):
-                    role = "admin"
-                elif tokens.get("read") and hmac.compare_digest(gb, tokens["read"].encode("utf-8", "replace")):
-                    role = "read"
+                for r in reversed(ROLES):            # admin, operator, read: azonos tokennel a magasabb nyer
+                    if tokens.get(r) and hmac.compare_digest(gb, tokens[r].encode("utf-8", "replace")):
+                        role = r
+                        break
             if role is None:
                 # nincs alvas (a szinkron fuggoseg a szalkészletben futna, igy a hibas probak kimerithetnek): kliensenkenti korlat
                 if failure(request.client.host if request.client else "-"):
                     raise HTTPException(429, "too many failed attempts", headers={"Retry-After": "60"})
                 raise HTTPException(401, "missing or invalid token", headers={"WWW-Authenticate": "Bearer"})
-            if need == "admin" and role != "admin":
-                raise HTTPException(403, "admin token required")
+            if ROLES.index(role) < ROLES.index(need):
+                raise HTTPException(403, f"{need} token required")
             return Actor(role, ACTOR_RX.sub("", x_actor or "")[:32])
         return dep
 
-    read, admin = authed("read"), authed("admin")
+    read, operator, admin = authed("read"), authed("operator"), authed("admin")
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -840,7 +848,7 @@ def create_app(rt, tokens=None):
         return v
 
     @app.post("/api/v1/incidents/{inc}/state")
-    def incident_state(inc: str, body: IncStateIn, who: Actor = Depends(admin)):
+    def incident_state(inc: str, body: IncStateIn, who: Actor = Depends(operator)):
         inc_head(inc)
         try:
             store.inc_set_state(inc, body.state, who.name, None if body.owner is None else body.owner.strip())
@@ -849,13 +857,13 @@ def create_app(rt, tokens=None):
         return {"ok": True}
 
     @app.post("/api/v1/incidents/{inc}/notes")
-    def incident_note(inc: str, body: IncNoteIn, who: Actor = Depends(admin)):
+    def incident_note(inc: str, body: IncNoteIn, who: Actor = Depends(operator)):
         inc_head(inc)
         store.inc_add_note(inc, redact(body.text.strip()), who.name)
         return {"ok": True}
 
     @app.post("/api/v1/incidents/{inc}/feedback")
-    def incident_feedback(inc: str, body: IncFeedbackIn, who: Actor = Depends(admin)):
+    def incident_feedback(inc: str, body: IncFeedbackIn, who: Actor = Depends(operator)):
         errs = [f"{k} must be one of {', '.join(v)}" for k, v in FB_CHOICES.items() if getattr(body, k) not in v]
         if errs:
             raise HTTPException(422, {"errors": errs})
@@ -931,7 +939,7 @@ def create_app(rt, tokens=None):
         return r
 
     @app.post("/api/v1/replays")
-    def replay_start(body: ReplayIn, who: Actor = Depends(admin)):
+    def replay_start(body: ReplayIn, who: Actor = Depends(operator)):
         """Egy tarolt digest / incidens ujrafuttatasa ugyanarra az ablakra, a mai zajlistaval, topologiaval es vedelmekkel, kerésre masik
         modellel. Nem ir a tarba, nem ertesit; egyszerre egy fut (a modellgep terhelese miatt). Hatterben fut: a GET /replays/{id} mutatja."""
         model = (body.model or "").strip() or aiops.CFG["MODEL"]
@@ -976,7 +984,7 @@ def create_app(rt, tokens=None):
                 "suppressed": aiops.STATUS.get("maintenance_suppressed", 0)}
 
     @app.post("/api/v1/maintenance")
-    def maintenance_add(body: MaintIn, who: Actor = Depends(admin)):
+    def maintenance_add(body: MaintIn, who: Actor = Depends(operator)):
         """Uj ablak (alapbol most indul). Olvaso token: javaslat (POST /proposals, key 'maintenance', content)."""
         now = aiops.utcnow().replace(tzinfo=None)
         start = maintenance.parse_ts(body.start) if body.start else now.replace(microsecond=0)
@@ -992,7 +1000,7 @@ def create_app(rt, tokens=None):
         return {"ok": True, "id": wid, "window": maintenance.views(aiops.TOPOLOGY, {"windows": [w]})[0]}
 
     @app.post("/api/v1/maintenance/{wid}/end")
-    def maintenance_end(wid: str, who: Actor = Depends(admin)):
+    def maintenance_end(wid: str, who: Actor = Depends(operator)):
         """Ablak lezarasa most (aktiv: az 'end' most; meg nem kezdodott: torles)."""
         doc = maint_doc()
         now = aiops.utcnow().replace(tzinfo=None, microsecond=0)
@@ -1068,16 +1076,16 @@ def create_app(rt, tokens=None):
         return {"status": novelty.status(store), "findings": rows, "advisor": adv.info()}
 
     @app.post("/api/v1/novelty/dismiss")
-    def novelty_dismiss_many(body: DismissIn, who: Actor = Depends(admin)):
+    def novelty_dismiss_many(body: DismissIn, who: Actor = Depends(operator)):
         """Tomeges lezaras azonositok szerint (csoport / 'valoszinuleg zaj' gomb); csak a nyitott leleteket erinti."""
         return {"dismissed": store.nov_dismiss_ids(body.ids, who.name, f"{len(body.ids)} finding(s) (bulk)")}
 
     @app.post("/api/v1/novelty/dismiss-all")
-    def novelty_dismiss_all(who: Actor = Depends(admin)):
+    def novelty_dismiss_all(who: Actor = Depends(operator)):
         return {"dismissed": store.nov_dismiss(None, who.name)}
 
     @app.post("/api/v1/novelty/{fid}/dismiss")
-    def novelty_dismiss(fid: int, who: Actor = Depends(admin)):
+    def novelty_dismiss(fid: int, who: Actor = Depends(operator)):
         n = store.nov_dismiss(fid, who.name)
         if not n:
             raise HTTPException(404, f"no open finding {fid}")
@@ -1085,7 +1093,7 @@ def create_app(rt, tokens=None):
 
     # ------------------------------------------------------------ feladatok, audit
     @app.post("/api/v1/jobs/digest")
-    def job_digest(body: DigestIn | None = None, who: Actor = Depends(admin)):
+    def job_digest(body: DigestIn | None = None, who: Actor = Depends(operator)):
         hours = (body.hours if body else None) or aiops.CFG["DIGEST_HOURS"]
         if not 1 <= hours <= 168:
             raise HTTPException(422, {"errors": ["hours must be between 1 and 168"]})

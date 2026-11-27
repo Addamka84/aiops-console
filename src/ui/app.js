@@ -76,6 +76,7 @@ function diffEl(text) {
   return pre;
 }
 const isAdmin = () => S.role === 'admin';
+const canOperate = () => S.role === 'admin' || S.role === 'operator';   // napi uzemeltetes: incidens, karbantartas, visszajatszas, leletek, kezi digest
 
 // ---------------------------------------------------------------- shell
 // [id, label, group]: the side menu shows the groups; on a narrow screen it becomes one scrollable row.
@@ -147,7 +148,7 @@ async function refreshPendingCount() {
 }
 
 function renderLogin(msg) {
-  const inp = h('input', { type: 'password', class: 'mono grow', placeholder: 'API token (read or admin)', autocomplete: 'off' });
+  const inp = h('input', { type: 'password', class: 'mono grow', placeholder: 'API token (read, operator or admin)', autocomplete: 'off' });
   const go_ = async () => {
     S.token = inp.value.trim(); S.role = null;
     storage.set('token', S.token);
@@ -246,7 +247,7 @@ function incDetailEl(d) {
   const x = S.inc;
   const sel = (k) => h('select', { onchange: (e) => { x.fb[k] = e.target.value; } }, FB_OPTS[k].map(([v, l]) => h('option', { value: v, selected: x.fb[k] === v }, l)));
   const st = d.state;
-  const actions = isAdmin() ? h('div', { style: 'margin-top:12px' },
+  const actions = canOperate() ? h('div', { style: 'margin-top:12px' },
     h('div', { class: 'row' },
       h('input', { placeholder: 'owner (optional)', value: x.owner, style: 'width:180px', oninput: (e) => { x.owner = e.target.value; } }),
       st !== 'acknowledged' && st !== 'resolved' ? h('button', { class: 'btn primary', onclick: () => incPost('/state', { state: 'acknowledged', owner: x.owner }, 'Acknowledged') }, 'Acknowledge') : null,
@@ -344,13 +345,13 @@ function drawMaint() {
       h('td', {}, h('strong', {}, w.targets.join(', ')), w.include_dependents ? h('div', { class: 'muted small' }, 'covers ' + w.covers.length + ': ' + w.covers.join(', ')) : null,
         w.note ? h('div', { class: 'small' }, w.note) : null),
       h('td', { class: 'small nowrap' }, fmtTime(w.start), h('div', {}, '→ ' + fmtTime(w.end))),
-      h('td', {}, isAdmin() && w.state !== 'ended' ? h('button', { class: 'btn small', onclick: () => mwEnd(w.id) }, w.state === 'active' ? 'End now' : 'Cancel') : null))) : [];
+      h('td', {}, canOperate() && w.state !== 'ended' ? h('button', { class: 'btn small', onclick: () => mwEnd(w.id) }, w.state === 'active' ? 'End now' : 'Cancel') : null))) : [];
   renderShell([
     h('h2', {}, 'Maintenance'),
     h('p', { class: 'muted' }, 'During a planned change (hardware swap, stack redeploy, update), alerts and detector hits on the targets are only logged: no incident, no correlation. With "include dependents" the devices that depend on a target in the topology are covered too.'),
     x.error ? h('div', { class: 'err' }, x.error) : null,
     d ? h('p', { class: 'small muted' }, 'Revision #' + d.rev + ' · ' + d.suppressed + ' alert(s) logged only because of a window since the service started') : null,
-    isAdmin() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New window'),
+    canOperate() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New window'),
       h('div', { class: 'row' },
         h('input', { class: 'grow', list: 'mw-assets', placeholder: 'devices, e.g. homesrv (comma separated)', value: x.targets, oninput: (e) => { x.targets = e.target.value; } }),
         h('datalist', { id: 'mw-assets' }, x.assets.map((a) => h('option', { value: a }))),
@@ -377,7 +378,7 @@ const normTitle = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' 
 async function pageReplay() {
   const x = S.rp;
   try {
-    const [d, src] = await Promise.all([api('GET', '/api/v1/replays'), isAdmin() ? api('GET', '/api/v1/replays/sources?days=7') : Promise.resolve([])]);
+    const [d, src] = await Promise.all([api('GET', '/api/v1/replays'), canOperate() ? api('GET', '/api/v1/replays/sources?days=7') : Promise.resolve([])]);
     x.data = d; x.sources = src; x.error = '';
     if (!x.source && src.length) x.source = src[0].id;
     if (x.sel) x.detail = await api('GET', '/api/v1/replays/' + x.sel);
@@ -435,7 +436,7 @@ function drawReplay() {
     h('h2', {}, 'Replay & compare'),
     h('p', { class: 'muted' }, 'Run a stored digest or incident again on the same time window, with the current or another model, and compare the two outputs side by side. Useful before changing the model or a prompt. Nothing is written to the log store and no notification is sent; one replay runs at a time.'),
     x.error ? h('div', { class: 'err' }, x.error) : null,
-    isAdmin() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New replay'),
+    canOperate() ? h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'New replay'),
       h('div', { class: 'row' },
         h('select', { class: 'grow', onchange: (e) => { x.source = e.target.value; } },
           x.source && !x.sources.some((s) => s.id === x.source) ? h('option', { value: x.source, selected: true }, x.source) : null,
@@ -594,7 +595,7 @@ function noveltyPanel() {
         const r = await api('POST', '/api/v1/novelty/' + x.id + '/detector-draft');
         toast('Detector proposal #' + r.id + ' created (' + r.backtest.firings + ' firing(s) in ' + (r.backtest.hours / 24) + ' days).'); refreshPendingCount();
       }) }, '+ detector'), ' ',
-      isAdmin() ? h('button', { class: 'btn', title: 'Mark as reviewed (hides it from this list and the digest)', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/' + x.id + '/dismiss')) }, 'Dismiss') : null));
+      canOperate() ? h('button', { class: 'btn', title: 'Mark as reviewed (hides it from this list and the digest)', onclick: () => noveltyDo(() => api('POST', '/api/v1/novelty/' + x.id + '/dismiss')) }, 'Dismiss') : null));
   const ui = S.novUi;
   const redraw = () => pageStatus().catch(() => {});
   const visible = ui.level === 'all' ? f : f.filter((x) => WARN_UP.includes(x.level));
@@ -612,7 +613,7 @@ function noveltyPanel() {
     const det = h('details', { open: ui.open[host] === undefined ? groups.length <= 2 : ui.open[host], ontoggle: () => { ui.open[host] = det.open; } },
       h('summary', {}, h('strong', {}, host), ' ', h('span', { class: 'badge b-unknown' }, rows.length), ' ', h('span', { class: 'muted small' }, lvCount(rows)),
         rows.some((x) => x.likely_noise) ? h('span', { class: 'muted small' }, ' · likely noise ' + rows.filter((x) => x.likely_noise).length) : null,
-        isAdmin() ? h('button', { class: 'btn', style: 'margin-left:8px', title: 'Dismiss every finding of this host in the current view',
+        canOperate() ? h('button', { class: 'btn', style: 'margin-left:8px', title: 'Dismiss every finding of this host in the current view',
           onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); dismissIds(rows.map((x) => x.id), 'of ' + host); } }, 'Dismiss ' + rows.length) : null),
       tbl(rows));
     return det;
@@ -623,10 +624,10 @@ function noveltyPanel() {
   const grpBox = h('input', { type: 'checkbox', checked: ui.group, onchange: () => { ui.group = grpBox.checked; redraw(); } });
   return h('div', { class: 'panel' },
     h('div', { class: 'row' }, title,
-      isAdmin() && f.length > 1 ? h('button', { class: 'btn', title: 'Dismiss every open finding, including the hidden ones', onclick: () => confirm('Dismiss all ' + f.length + ' open findings (including hidden ones)?') && noveltyDo(() => api('POST', '/api/v1/novelty/dismiss-all')) }, 'Dismiss all (' + f.length + ')') : null),
+      canOperate() && f.length > 1 ? h('button', { class: 'btn', title: 'Dismiss every open finding, including the hidden ones', onclick: () => confirm('Dismiss all ' + f.length + ' open findings (including hidden ones)?') && noveltyDo(() => api('POST', '/api/v1/novelty/dismiss-all')) }, 'Dismiss all (' + f.length + ')') : null),
     h('p', { class: 'muted small' }, info),
     f.length ? h('div', { class: 'row', style: 'margin-bottom:8px' }, lvlSel, h('label', { class: 'small' }, grpBox, ' group by host'),
-      isAdmin() && likely.length ? h('button', { class: 'btn', title: 'Advisory marks only: review a few first', onclick: () => dismissIds(likely.map((x) => x.id), 'marked likely noise') }, 'Dismiss likely noise (' + likely.length + ')') : null) : null,
+      canOperate() && likely.length ? h('button', { class: 'btn', title: 'Advisory marks only: review a few first', onclick: () => dismissIds(likely.map((x) => x.id), 'marked likely noise') }, 'Dismiss likely noise (' + likely.length + ')') : null) : null,
     hidden ? h('p', { class: 'muted small' }, hidden + ' lower-level finding(s) (info, debug, notice) hidden. ',
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); ui.level = 'all'; redraw(); } }, 'Show everything')) : null,
     visible.length ? (ui.group ? h('div', {}, groups.map(group))
@@ -664,10 +665,10 @@ async function pageStatus() {
           h('dt', {}, 'Last notification'), h('dd', {}, s.last_notify ? (s.last_notify.ok ? 'ok' : 'FAILED') + ' · ' + s.last_notify.kind + ' · ' + fmtTime(s.last_notify.at) : '-'),
           h('dt', {}, 'Config revisions'), h('dd', {}, 'known #' + s.config.known_rev + ', topology #' + (s.config.topology_rev || 0) + ', detectors #' + (s.config.detectors_rev || 0) + ', rules #' + (s.config.rules_rev || 0) + ', settings #' + s.config.settings_rev))),
       h('div', { class: 'panel' }, h('h3', { style: 'margin-top:0' }, 'Actions'),
-        isAdmin() ? h('div', { class: 'row' },
+        canOperate() ? h('div', { class: 'row' },
           h('span', { class: 'muted small' }, 'Digest over the last'), hoursInp, h('span', { class: 'muted small' }, 'h'),
           h('button', { class: 'btn primary', onclick: act(async () => { await api('POST', '/api/v1/jobs/digest', { hours: Number(hoursInp.value) }); toast('Digest queued'); }) }, 'Run now'))
-          : h('p', { class: 'muted small' }, 'Admin token required.'),
+          : h('p', { class: 'muted small' }, 'Operator or admin token required.'),
         isAdmin() ? h('div', { class: 'row', style: 'margin-top:8px' },
           h('button', { class: 'btn', disabled: !s.notify_configured, onclick: act(async () => { await api('POST', '/api/v1/jobs/notify-test'); toast('Test notification queued'); }) }, 'Send test notification')) : null)),
     noveltyPanel(),

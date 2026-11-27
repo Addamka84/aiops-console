@@ -2,11 +2,12 @@
 # Secrets are provided as environment variables (e.g. Portainer stack environment), never in the config store:
 #   CONSOLE_ADMIN_TOKEN  - full access (UI / you)
 #   CONSOLE_READ_TOKEN   - read-only + may CREATE proposals (an assistant / automation)
+#   CONSOLE_OPERATOR_TOKEN - optional: day-to-day operations (incidents, maintenance windows, replays, findings), no config writes
 #   HA_WEBHOOK_URL       - optional Home Assistant webhook for notifications
 
 services:
   aiops:
-    image: ghcr.io/OWNER/aiops-console:v2.0.0-alpha.41
+    image: ghcr.io/OWNER/aiops-console:v2.0.0-alpha.42
     container_name: aiops
     restart: unless-stopped
     environment:
@@ -17,6 +18,7 @@ services:
       HA_WEBHOOK_URL: ${HA_WEBHOOK_URL:-}
       CONSOLE_ADMIN_TOKEN: ${CONSOLE_ADMIN_TOKEN:?set CONSOLE_ADMIN_TOKEN}
       CONSOLE_READ_TOKEN: ${CONSOLE_READ_TOKEN:-}
+      CONSOLE_OPERATOR_TOKEN: ${CONSOLE_OPERATOR_TOKEN:-}
     ports:
       - "127.0.0.1:8095:8095"   # bind to a LAN address instead if you need remote access
     volumes:
