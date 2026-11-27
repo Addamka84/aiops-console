@@ -246,6 +246,10 @@ class KickAndApiTests(SyncCase):
         self.c = TestClient(console.create_app(self.rt, tokens={"read": "r-token", "admin": "a-token"}))
 
     def tearDown(self):
+        # a hatterszal ne fusson at a kovetkezo tesztbe (2026-11-27: egy atfuto szal a regi tarba irta az auditot, a CI-ben idonkent elbukott)
+        end = time.monotonic() + 10
+        while rulesync._worker["thread"] is not None and time.monotonic() < end:
+            time.sleep(0.05)
         aiops.ENV_CFG["RULES_SYNC"] = self.env_saved
         super().tearDown()
 
@@ -264,6 +268,16 @@ class KickAndApiTests(SyncCase):
         self.assertEqual(rulesync.status()["applied_rev"], r.json()["rev"])
         self.assertTrue(os.path.exists(self.path))
         self.assertTrue(any(a["action"] == "rules-sync" and a["actor"] == "system" for a in self.rt.store.audit_list(20)))
+
+    def test_running_worker_switches_to_the_new_store(self):
+        # egy mar futo szal (pl. az elozo Runtime-e) a legutobb atadott tarat hasznalja
+        other = Store()
+        rulesync._worker["store"] = other
+        r = self.c.put("/api/v1/config/rules", headers=self.A, json={"content": {"rules": [rule()]}, "comment": "x"})
+        self.wait("ok")
+        self.assertEqual(rulesync._worker["store"], self.rt.store)
+        self.assertEqual(rulesync.status()["applied_rev"], r.json()["rev"])
+        self.assertFalse(other.audit_list(20))
 
     def test_status_api_shows_state_and_the_live_vmalert_groups(self):
         self.c.put("/api/v1/config/rules", headers=self.A, json={"content": {"rules": [rule()]}})

@@ -26,7 +26,7 @@ _LOCK = threading.Lock()          # egyszerre egy kiadas
 _STATE_LOCK = threading.Lock()
 STATE = {"state": "off", "message": "", "ts": "", "rev": 0, "applied_rev": 0, "rules": 0}
 _kick_lock = threading.Lock()
-_worker = {"thread": None, "again": False, "force": False}
+_worker = {"thread": None, "again": False, "force": False, "store": None}
 FAIL_FAST_S = 6      # ennyi ido utan egy "sikertelen reload" jelzes veglegesnek szamit (a metrika a reload elott meg a regi lehet)
 POLL_S = 2
 _OK_RX = re.compile(r"^vmalert_config_last_reload_successful\s+(\S+)\s*$", re.M)
@@ -233,6 +233,7 @@ def kick(store, force=False):
     with _kick_lock:
         _worker["again"] = True
         _worker["force"] = _worker["force"] or force
+        _worker["store"] = store      # a mar futo szal is ezt hasznalja (2026-11-27: a regi tarba irt auditot, a teszt CI-ben idonkent elbukott)
         t = _worker["thread"]
         if t is not None and t.is_alive():
             return
@@ -248,6 +249,7 @@ def _run(store):
                 _worker["thread"] = None
                 return
             _worker["again"], force, _worker["force"] = False, _worker["force"], False
+            store = _worker.get("store") or store
         cur = store.current("rules")
         doc, rev = (cur["content"], cur["id"]) if cur else ({}, 0)
         try:
