@@ -118,7 +118,7 @@ CFG = {
     "RULES_SYNC": os.environ.get("RULES_SYNC", "off"),                           # on | off
     "RULES_SYNC_TIMEOUT_S": _env_int("RULES_SYNC_TIMEOUT_S", 40),                # mp: a reload utani ellenorzes idokerete
 }
-__version__ = "2.0.0-alpha.40"
+__version__ = "2.0.0-alpha.41"
 # A kornyezeti valtozokbol szarmazo alapertekek (a konzolbol szerkesztett felulirasok ezekre rakodnak ra).
 ENV_CFG = {k: (list(v) if isinstance(v, list) else v) for k, v in CFG.items()}
 
@@ -1444,6 +1444,8 @@ def run_job(job, known, pool, dry_run=False, model=None, replay=False):
     issues, burst_notes = guard_burst(issues, rows, raw.get("c") or [])
     guard_notes += burst_notes
     changed = changed or bool(burst_notes)
+    issues, mon_notes = guard_monitor_hosts(issues, rows, raw, TOPOLOGY)
+    guard_notes += mon_notes
     side, summary_in = [], out["summary"]
     if job["kind"] == "incident":
         issues, side, summary_in, focus_notes = guard_focus(issues, incident_anchors(job, evidence), summary_in)
@@ -1531,7 +1533,12 @@ _QUOTE_MIN = 10
 _SYMPTOM_RX = re.compile(r"failed with result|(?:main |control )?process exited|exited with (?:exit )?(?:code|status)|code=exited|status=0"
                          r"|failed all 0 attempts|pending: failed|\bis down\b|\bwent down\b|\bstopped responding\b|start request repeated too quickly"
                          r"|failed to start\b|entered failed state|unit .* failed\b|failed to mount \S+\.mount(?: - \S+)?\.?$"
-                         r"|^traceback \(most recent call last\)|^raise \w+\($|^(?:\w+ )?error:?$")
+                         r"|^traceback \(most recent call last\)|^raise \w+\($|^(?:\w+ )?error:?$"
+                         # 2026-11-27: Tuya 'Failed to refresh device state for X. Device reported erro...' (a valodi hibakod levagva)
+                         r"|failed to (?:refresh|update|poll) (?:device )?(?:state|status|data)(?: for \S+)?\.?"
+                         r"(?: device reported erro\w*(?:\.\.\.|…)?)?$"
+                         # a riasztas szovege maga ('[FIRING] KumaMonitorDown x0 Uptime Kuma: Speaker-Bedroom LE ALLT'): a tenyt mondja, nem az okat
+                         r"|^\[firing\]|\ble allt\b")
 
 
 def _qnorm(s):
@@ -1711,6 +1718,80 @@ def guard_resolved(issues, rows, alerts=()):
         if SEVERITIES.index(sev) > SEVERITIES.index(cap):
             i = dict(i, severity=cap)
             notes.append(f"'{cut(i.get('title', ''), 60)}': resolved, severity {sev} -> {cap}")
+        out.append(i)
+    return out, notes
+
+
+KUMA_APPS = ("uptime-kuma", "kuma")   # az Uptime Kuma kontenernaploja (docker appname) es webhook-esemenyei (appname kuma)
+_KUMA_LOG_RX = re.compile(r"Monitor #\S+ '([^']+)':\s*(.*)")       # [MONITOR] WARN: Monitor #34 'GameSRV - CS1.6': Pending: ...
+_KUMA_HOOK_RX = re.compile(r"^\[([^\]]+)\]\s*\[[^\]]*\]\s*(.*)", re.S)  # [NSPanel-Office] [🔴 Down] PING 192.0.2.58 ...
+
+
+def _flat(s):
+    """Monitornev-osszeveteshez: kisbetu, a <N> es a szamok, szokozok, irasjelek nelkul ('GameSRV - CS<N>.<N>' ~ 'GameSRV - CS1.6')."""
+    return re.sub(r"[^a-z]+", "", str(s or "").lower().replace("<n>", ""))
+
+
+def kuma_targets(raw, topo):
+    """A Kuma-monitorok celgepei a nyers sorokbol: [(osszevont monitornev, celgep id)], es a Kuma sajat hosztnevei.
+    A cel: a monitornev topologiai talalata (alias: 'GameSRV' -> nihil), ha nincs, az uzenet ELSO talalata (PING / ECONNREFUSED cim).
+    Kontener / szolgaltatas celnal a futtato gep (runs_on). A Kuma sajat gepe nem lehet cel."""
+    own = {"uptime-kuma", "kuma"}
+    events = []
+    for x in raw.get("d", []) or []:
+        if str(x.get("appname", "")).lower() in KUMA_APPS:
+            own.add(str(x.get("host", "")).lower())
+            m = _KUMA_LOG_RX.search(str(x.get("_msg", "")))
+            if m:
+                events.append(m.groups())
+    for x in raw.get("c", []) or []:
+        if str(x.get("appname", "")).lower() == "kuma":
+            m = _KUMA_HOOK_RX.match(str(x.get("_msg", "")))
+            if m:
+                events.append(m.groups())
+    own.discard("")
+    if not topo or not events:
+        return [], own
+    own_ids = {topo.find(h) for h in own} | {topo.find("uptime-kuma")}
+    own_ids |= {topo.assets[a].get("runs_on") for a in list(own_ids) if a in topo.assets}
+    out = []
+    for name, msg in events:
+        flat = _flat(name)
+        direct = [a for a in topo.match([name]) if a not in own_ids]
+        if len(flat) < 3 or (len(flat) < 5 and not direct):   # rovid nev ('Game' csoport) csak kozvetlen topologiai talalattal
+            continue
+        hits = direct or [a for a in topo.match([msg])[:1] if a not in own_ids]
+        for aid in hits[:1]:
+            a = topo.assets.get(aid, {})
+            tgt = a.get("runs_on") if a.get("kind") in ("container", "service") and a.get("runs_on") else aid
+            if (flat, tgt) not in out:
+                out.append((flat, tgt))
+    return out, own
+
+
+def guard_monitor_hosts(issues, rows, raw, topo):
+    """Kuma-monitor ugyek gepe (2026-11-24: a 'GameSRV - CS1.6' monitor kiesese homesrv-re kerult, mert ott fut a Kuma; a monitor a nihilt
+    figyeli). Ha egy ugy cime / bizonyiteka / oka egy Kuma-monitort nevez meg, es a hosts-lista ures vagy a Kuma gepet tartalmazza:
+    a monitor celgepe bekerul, a Kuma gepe kikerul (hacsak nincs az ugynek ott mas, nem Kuma bizonyito sora). A cel a topologiabol jon
+    (alias / IP); ismeretlen monitornal az ugy valtozatlan. -> (ugyek, megjegyzesek)"""
+    targets, own = kuma_targets(raw, topo)
+    if not targets:
+        return issues, []
+    out, notes = [], []
+    for i in issues:
+        hosts = [str(h) for h in i.get("hosts", [])]
+        low = [h.lower() for h in hosts]
+        text = _flat(" ".join(str(i.get(k, "")) for k in ("title", "evidence", "likely_cause")))
+        tg = [t for f, t in targets if f in text]
+        if not tg or (low and not set(low) & own):
+            out.append(i)
+            continue
+        other = {r[0] for r in _issue_rows(i, rows) if r[1] not in KUMA_APPS}
+        new = [h for h, lh in zip(hosts, low) if lh not in own or lh in other]
+        new += [t for t in dict.fromkeys(tg) if t.lower() not in [h.lower() for h in new]]
+        if new != hosts:
+            notes.append(f"'{cut(i.get('title', ''), 60)}': hosts {', '.join(hosts) or '-'} -> {', '.join(new)} (Uptime Kuma monitor target)")
+            i = dict(i, hosts=new)
         out.append(i)
     return out, notes
 
