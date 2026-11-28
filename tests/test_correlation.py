@@ -1,8 +1,8 @@
 """Alert correlation through the topology (correlation.py + the wiring in aiops.py), evidence aggregation, grounding of model output."""
 import os
 import sys
-import time
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -26,7 +26,7 @@ def item(key, text, cis, ts=0.0):
     return {"key": key, "text": text, "ts": ts, "cis": cis, "alert_labels": [], "detector": None}
 
 
-class CorrelationTests(unittest.TestCase):
+class CorrelationTests(IsolatedTestCase):
     def setUp(self):
         self.t = topology.Topology(DOC)
 
@@ -86,7 +86,7 @@ class CorrelationTests(unittest.TestCase):
         self.assertIsNone(single["root"])
 
 
-class WiringTests(unittest.TestCase):
+class WiringTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.TOPOLOGY, dict(aiops.CFG))
         aiops.TOPOLOGY = topology.Topology(DOC)
@@ -153,7 +153,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(self.state["alert_items"][0]["detector"]["id"], "nfs")
 
 
-class EvidenceAggregationTests(unittest.TestCase):
+class EvidenceAggregationTests(IsolatedTestCase):
     def setUp(self):
         self.saved = aiops.item_evidence
 
@@ -180,7 +180,7 @@ class EvidenceAggregationTests(unittest.TestCase):
         self.assertEqual(aiops.alert_evidence({"alert_text": "t"}, None, None, None)["kept"], ["x"])
 
 
-class GroundingTests(unittest.TestCase):
+class GroundingTests(IsolatedTestCase):
     def test_names_missing_from_the_input_are_removed_but_the_issue_stays(self):
         issues = [{"title": "t", "hosts": ["homesrv3", "ghost-server"], "severity": "high"}, {"title": "u", "hosts": []}]
         out, removed = aiops.ground_issues(issues, "alerts about HOMESRV3 and plex")
@@ -188,7 +188,7 @@ class GroundingTests(unittest.TestCase):
         self.assertEqual(out[1]["hosts"], [])
 
 
-class RunJobInputTests(unittest.TestCase):
+class RunJobInputTests(IsolatedTestCase):
     def test_the_model_sees_the_related_alerts_and_the_hypothesis(self):
         saved = (aiops.TOPOLOGY, aiops.collect, aiops.review_stats, aiops.ollama_chat, aiops.vl_query, aiops.vl_insert, aiops.build_input)
         seen = {}
@@ -197,7 +197,6 @@ class RunJobInputTests(unittest.TestCase):
         aiops.review_stats = lambda *a, **k: {}
         aiops.vl_query = lambda q, timeout=None: []
         aiops.vl_insert = lambda ev, timeout=None: None
-        real_build = aiops.build_input
 
         def spy(known, a, b, extra_lines=None, raw=None):
             seen["extra"] = list(extra_lines or [])

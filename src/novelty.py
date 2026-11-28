@@ -280,7 +280,7 @@ def step(store, known, now=None):
         if STATE["backfill"] == "running":
             try:
                 _backfill_chunk(store, now)
-            except (OSError, ValueError) as e:
+            except (OSError, ValueError):
                 _backfill_failed(store, now)
                 raise
             return

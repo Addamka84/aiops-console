@@ -4,6 +4,7 @@
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -34,7 +35,7 @@ def basis(cause, quote=None):
     return out[0]["cause_basis"], out[0]["cause_quote"]
 
 
-class Normalize(unittest.TestCase):
+class Normalize(IsolatedTestCase):
     def test_numbers_and_placeholders_match(self):
         self.assertEqual(aiops._qnorm("status=1/FAILURE"), aiops._qnorm("status=<N>/FAILURE"))
         self.assertEqual(aiops._qnorm("10.0.0.5:/volume1"), aiops._qnorm("<N>.<N>.<N>.<N>:/volume<N>"))
@@ -50,7 +51,7 @@ class Normalize(unittest.TestCase):
         self.assertTrue(aiops._quote_found("cloud-init-base:1 duplicate log entry ... nonsense", aiops._qnorm(USER)))
 
 
-class GuardCause(unittest.TestCase):
+class GuardCause(IsolatedTestCase):
     def test_real_cause_line_is_log(self):
         self.assertEqual(basis("A sensor reports 'Healthy'.", "could not convert string to float: 'Healthy'"),
                          ("log", "could not convert string to float: 'Healthy'"))
@@ -96,7 +97,7 @@ class GuardCause(unittest.TestCase):
         self.assertEqual((out[0]["severity"], out[0]["hosts"]), ("high", ["nihil"]))
 
 
-class GenericQuotes(unittest.TestCase):
+class GenericQuotes(IsolatedTestCase):
     U = "x | ha | 3x | Traceback (most recent call last):\nx | ha | 3x | raise ValueError(\n"
 
     def test_traceback_and_raise_are_symptoms(self):
@@ -105,7 +106,7 @@ class GenericQuotes(unittest.TestCase):
             self.assertEqual(out[0]["cause_basis"], "symptom", q)
 
 
-class GuardBurst(unittest.TestCase):
+class GuardBurst(IsolatedTestCase):
     import datetime as _dt
     T0 = _dt.datetime(2026, 11, 25, 8, 0)
 
@@ -146,7 +147,7 @@ class GuardBurst(unittest.TestCase):
         self.assertEqual((out[0]["severity"], notes), ("low", []))
 
 
-class Wiring(unittest.TestCase):
+class Wiring(IsolatedTestCase):
     def test_schema_requires_quote(self):
         it = aiops.SCHEMA["properties"]["issues"]["items"]
         self.assertIn("cause_quote", it["properties"])

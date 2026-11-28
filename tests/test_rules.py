@@ -4,6 +4,7 @@ Futtatas (a stacks/aiops-console mappabol): python3 -m unittest discover -s test
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -33,7 +34,7 @@ def errs(*rs):
     return rules.validate({"rules": list(rs)})
 
 
-class ValidateTests(unittest.TestCase):
+class ValidateTests(IsolatedTestCase):
     def test_valid_kinds(self):
         self.assertEqual(errs(rule(), silence(), {"id": "AIOpsDown", "kind": "absent", "query": "pipeline:ai kind:heartbeat", "window_min": 30},
                               {"id": "HostRebooted", "kind": "raw", "interval_min": 5,
@@ -95,7 +96,7 @@ class ValidateTests(unittest.TestCase):
         self.assertTrue(raw("a | stats count() as n", evidence="b | c"))          # az evidence szuro: cso nelkul
 
 
-class RenderTests(unittest.TestCase):
+class RenderTests(IsolatedTestCase):
     def test_count_expr_matches_the_existing_flood_rule_semantics(self):
         self.assertEqual(rules.expr(rule()), "_time:1m (pipeline:docker) | stats by (host, appname) count() as hits | filter hits:>=12001")
         self.assertEqual(rules.expr(rule(group_by=[], threshold=3, window_min=15)), "_time:15m (pipeline:docker) | stats count() as hits | filter hits:>=3")
@@ -170,7 +171,7 @@ groups:
         self.assertEqual(rules.preview({"rules": [rule()]}, 3)["errors"], [])
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 

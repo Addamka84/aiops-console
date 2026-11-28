@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import unittest
+from _base import IsolatedTestCase
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,7 +20,18 @@ import aiops  # noqa: E402
 
 
 class Fake(ThreadingHTTPServer):
-    daemon_threads = True
+    # Handler threads are joined on close; a slow handler waits on stopping instead of sleeping, so shutdown() is quick
+    # and no request thread outlives the test (tests/_base.py fails a test that leaves a thread running).
+    daemon_threads = False
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.stopping = threading.Event()
+
+    def shutdown(self):
+        self.stopping.set()
+        super().shutdown()
+        self.server_close()
 
 
 def start(handler_cls):
@@ -53,7 +65,7 @@ def make_ollama(models=("qwen3.5:9b",), chat_delay=0.0, chat_content=None, calls
             body = json.loads(self.rfile.read(n))
             if calls is not None:
                 calls.append(("POST", self.path, body))
-            time.sleep(chat_delay)
+            self.server.stopping.wait(chat_delay)
             self._send({"message": {"content": json.dumps(chat_content or {"summary": "ok", "all_clear": True, "issues": []})},
                         "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 20})
     return H
@@ -87,7 +99,7 @@ def make_vl(rows_by_marker, inserts):
     return H
 
 
-class HeartbeatTests(unittest.TestCase):
+class HeartbeatTests(IsolatedTestCase):
     def _run(self, llm_up=True, vl_up=True):
         inserts = []
         vl, vl_url = start(make_vl({}, inserts))
@@ -122,7 +134,7 @@ class HeartbeatTests(unittest.TestCase):
         self.assertTrue(settings.validate({"HEARTBEAT_S": 99999})[1])
 
 
-class VolumeTests(unittest.TestCase):
+class VolumeTests(IsolatedTestCase):
     NOW = aiops.dt.datetime(2026, 11, 15, 16, 20, tzinfo=aiops.dt.timezone.utc)
 
     def setUp(self):
@@ -164,7 +176,7 @@ class VolumeTests(unittest.TestCase):
                 aiops.log_volume(hours, by, now=self.NOW)
 
 
-class KnownTests(unittest.TestCase):
+class KnownTests(IsolatedTestCase):
     def setUp(self):
         self.k = aiops.Known()
 
@@ -209,7 +221,7 @@ class KnownTests(unittest.TestCase):
             aiops.parse_output(json.dumps({"x": 1}))
 
 
-class DockerSectionTests(unittest.TestCase):
+class DockerSectionTests(IsolatedTestCase):
     def test_strip_ts(self):
         m = "<N>-<N>-<N> <N>:<N>:<N>.<N> [<N>-<N>-<N> <N>:<N>:<N>] watchdog.cam ERROR : crashed"
         self.assertEqual(aiops.strip_ts(m), "watchdog.cam ERROR : crashed")
@@ -226,7 +238,7 @@ class DockerSectionTests(unittest.TestCase):
         self.assertIn("100x error 0", out[0])
 
 
-class PoolTests(unittest.TestCase):
+class PoolTests(IsolatedTestCase):
     def setUp(self):
         aiops.CFG.update(PROBE_TIMEOUT=1, GEN_TIMEOUT=2, BACKOFF_MIN=2, BACKOFF_MAX=8)
 
@@ -298,7 +310,7 @@ class PoolTests(unittest.TestCase):
             srv.shutdown()
 
 
-class JobTests(unittest.TestCase):
+class JobTests(IsolatedTestCase):
     def setUp(self):
         aiops.CFG.update(PROBE_TIMEOUT=1, GEN_TIMEOUT=5, BACKOFF_MIN=2, BACKOFF_MAX=8)
         self.known = aiops.Known()
@@ -461,7 +473,7 @@ class JobTests(unittest.TestCase):
             ol.shutdown()
 
 
-class NotifyTests(unittest.TestCase):
+class NotifyTests(IsolatedTestCase):
     """HA webhook ertesites: mikor kuld, mit kuld, es hogy a hibaja sosem rontja el a munkat."""
 
     def setUp(self):
@@ -570,7 +582,7 @@ class NotifyTests(unittest.TestCase):
                 pass
 
             def do_POST(self):
-                time.sleep(3)
+                self.server.stopping.wait(3)
         ha, url = start(Slow)
         try:
             aiops.CFG["HA_WEBHOOK_URL"] = url
@@ -581,7 +593,7 @@ class NotifyTests(unittest.TestCase):
             ha.shutdown()
 
 
-class PollTests(unittest.TestCase):
+class PollTests(IsolatedTestCase):
     """Regresszio: ugyanaz a firing esemeny nem indithat ujra incidenst (a '_time:>T' masodperc-pontossagu hibaja)."""
 
     def _fake_vl(self, rows, queries):
@@ -659,7 +671,7 @@ class PollTests(unittest.TestCase):
             vl.shutdown()
 
 
-class SchedulerTests(unittest.TestCase):
+class SchedulerTests(IsolatedTestCase):
     def test_digest_scheduled_once_per_day(self):
         aiops.CFG["DIGEST_UTC"] = "00:00"
         state = {"pending": [], "last_digest_date": ""}

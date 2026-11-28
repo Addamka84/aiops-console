@@ -4,9 +4,9 @@ Futtatas (a stacks/aiops-console mappabol): python3 -m unittest discover -s test
 import copy
 import json
 import os
-import queue
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -32,7 +32,7 @@ def reset_cfg():
         aiops.COMMANDS.get_nowait()
 
 
-class StoreTests(unittest.TestCase):
+class StoreTests(IsolatedTestCase):
     def setUp(self):
         self.s = Store()
 
@@ -103,7 +103,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.s.current("known")["content"]["mode"], "b")
 
 
-class ValidationTests(unittest.TestCase):
+class ValidationTests(IsolatedTestCase):
     def test_known_ok_and_fixture_ok(self):
         self.assertEqual(aiops.validate_known(FIXTURE), [])
         self.assertEqual(aiops.validate_known({}), [])
@@ -145,7 +145,7 @@ class ValidationTests(unittest.TestCase):
             reset_cfg()
 
 
-class PatchTests(unittest.TestCase):
+class PatchTests(IsolatedTestCase):
     def test_patch_ops(self):
         doc = {"noise": ["a", "b"], "known_issues": [{"id": "k1", "note": "n", "match": "m"}], "context": ["c"]}
         out = runtime.apply_known_patch(doc, {"add_noise": ["c"], "remove_noise": ["a"], "remove_known_issue_ids": ["k1"],
@@ -162,7 +162,7 @@ class PatchTests(unittest.TestCase):
                 runtime.apply_known_patch(doc, bad)
 
 
-class RuntimeTests(unittest.TestCase):
+class RuntimeTests(IsolatedTestCase):
     def tearDown(self):
         reset_cfg()
 
@@ -209,7 +209,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(aiops.CFG["NOTIFY_MIN_SEVERITY"], aiops.ENV_CFG["NOTIFY_MIN_SEVERITY"])
 
 
-class AnalyzeTests(unittest.TestCase):
+class AnalyzeTests(IsolatedTestCase):
     RAW = {
         "a": [{"host": "ap", "appname": "hostapd", "severity": "warning", "_msg": "x", "hits": "50"}],
         "b": [{"_HOSTNAME": "homenas2", "SYSLOG_IDENTIFIER": "smartd", "_msg": "Device: x, FAILED SMART self-check", "hits": "3"},
@@ -239,7 +239,7 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(r["noise_lines"], 70)
 
 
-class SnoozeTests(unittest.TestCase):
+class SnoozeTests(IsolatedTestCase):
     LINE = "homesrv | frobnicate | auth error"
 
     def doc(self, until, rx=r"\| frobnicate \|"):
@@ -297,7 +297,7 @@ class SnoozeTests(unittest.TestCase):
         self.assertEqual(r["noise_lines"], 50)
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     TOK = {"read": "r-token", "admin": "a-token"}
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
@@ -641,7 +641,7 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("HA_WEBHOOK_URL", json.dumps(s))  # a webhook-cim (titok) nem szivarog
 
 
-class CommandTests(unittest.TestCase):
+class CommandTests(IsolatedTestCase):
     def tearDown(self):
         reset_cfg()
 

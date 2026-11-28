@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -29,7 +30,7 @@ ISSUES = [
 ]
 
 
-class IncidentApiTests(unittest.TestCase):
+class IncidentApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 
@@ -116,7 +117,7 @@ class IncidentApiTests(unittest.TestCase):
         self.assertEqual(self.c.get(f"/api/v1/incidents/{I1}", headers=self.R).status_code, 502)
 
 
-class EventTests(unittest.TestCase):
+class EventTests(IsolatedTestCase):
     def test_alert_items_stored_on_incident_head(self):
         res = {"kind": "incident", "summary": "s", "model": "m", "endpoint": "e", "window": "w", "all_clear": False, "issues": [],
                "dropped_known": 0, "secs": 1, "prompt_tokens": 1, "out_tokens": 1, "alert": "a", "alert_items": ["x", "y"]}

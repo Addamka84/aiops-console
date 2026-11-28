@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import unittest
+from _base import IsolatedTestCase
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +17,7 @@ PROMPT = ("== Root-cause HYPOTHESIS computed from the topology (not a certainty)
           "   Potentially impacted items (downstream of the hypothesis): 12.\n")
 
 
-class MockLlmTests(unittest.TestCase):
+class MockLlmTests(IsolatedTestCase):
     def test_incident_answer_matches_schema(self):
         a = mock_llm.answer(PROMPT)
         self.assertEqual(set(a), {"summary", "all_clear", "issues"})

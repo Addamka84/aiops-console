@@ -6,6 +6,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -21,7 +22,7 @@ def issue(sev, title):
             "evidence": "", "likely_cause": "", "suggested_action": ""}
 
 
-class SummaryTests(unittest.TestCase):
+class SummaryTests(IsolatedTestCase):
     def test_model_summary_kept_without_dropped(self):
         self.assertEqual(aiops.consistent_summary("all good", [issue("low", "x")], []), "all good")
 
@@ -36,7 +37,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(aiops.consistent_summary("disk!", [], [issue("critical", "SMART")]), "No new issues (1 known issue(s) left out).")
 
 
-class SummaryMentionTests(unittest.TestCase):
+class SummaryMentionTests(IsolatedTestCase):
     """alpha.32: a modell az ismert ugyet nem jelenti, de az osszefoglaloban megemliti (dropped_known = 0)."""
     def test_regex_mention(self):
         import re
@@ -53,7 +54,7 @@ class SummaryMentionTests(unittest.TestCase):
         self.assertIn("do not mention them in the summary", aiops.SYSTEM_PROMPT)
 
 
-class StaleGuardTests(unittest.TestCase):
+class StaleGuardTests(IsolatedTestCase):
     """alpha.32: 'ongoing' ugy, amelynek minden bizonyito mintaja 2 oranal regebben abbamaradt -> resolved, legfeljebb low."""
     END = dt.datetime(2026, 11, 24, 8, 15, tzinfo=dt.timezone.utc)
     ROWS = [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2)),
@@ -95,7 +96,7 @@ class StaleGuardTests(unittest.TestCase):
         self.assertEqual(aiops.timed_rows(k, raw), [("homesrv3", "immich_server", dt.datetime(2026, 11, 24, 4, 2), 3, None)])
 
 
-class Alpha33Tests(unittest.TestCase):
+class Alpha33Tests(IsolatedTestCase):
     """alpha.33 (2026-11-25-i digest): a vedelem utan ujraepitett osszefoglalo; err-szintu korlat a digestben; informacios riasztas."""
     HA = dict(issue("high", "Home Assistant: Repeated crashes requiring restart"), hosts=["homeassistant"],
               evidence="152 error lines in Home Assistant logs ('ERROR (MainThread)', 'Traceback')")
@@ -141,7 +142,7 @@ class Alpha33Tests(unittest.TestCase):
         self.assertIn("graceful restart", aiops.SYSTEM_PROMPT)
 
 
-class TimingTests(unittest.TestCase):
+class TimingTests(IsolatedTestCase):
     def test_single_burst_hours_ago(self):
         self.assertEqual(aiops.timing("2026-11-24T04:02:10.5Z", "2026-11-24T04:02:40.1Z", END), "single burst, last 2h before end")
 
@@ -164,7 +165,7 @@ class TimingTests(unittest.TestCase):
         self.assertNotIn("(", aiops.docker_section(rows)[0].split("|")[2])   # t_to nelkul a regi alak
 
 
-class InputTests(unittest.TestCase):
+class InputTests(IsolatedTestCase):
     def setUp(self):
         self.saved = aiops.vl_query
         self.qs = []

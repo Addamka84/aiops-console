@@ -3,6 +3,7 @@ a Supervisor javaslata, a kezi PUT es a jovahagyas is ugyanazon az ellenorzon me
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -16,7 +17,7 @@ CRIT = "esx-01 | dynatrace | Problem P-<N>: Host unavailable esx-01"
 HB = "esx-01 | dynatrace | OneAgent heartbeat OK, version <N>"
 
 
-class MustKeepTests(unittest.TestCase):
+class MustKeepTests(IsolatedTestCase):
     def test_validate_shape(self):
         self.assertEqual(aiops.validate_known({"must_keep": [CRIT]}), [])
         for bad in ("x", [1], [""], ["a" * 301], ["x"] * 201):

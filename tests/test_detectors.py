@@ -2,11 +2,10 @@
 Futtatas (a stacks/aiops-console mappabol): python3 -m unittest discover -s tests
 """
 import datetime as dt
-import json
 import os
-import queue
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -32,7 +31,7 @@ def known(noise=()):
     return aiops.Known(data={"noise": list(noise), "known_issues": [], "context": []})
 
 
-class ValidateTests(unittest.TestCase):
+class ValidateTests(IsolatedTestCase):
     def errs(self, *items):
         return detectors.validate({"detectors": list(items)})
 
@@ -71,7 +70,7 @@ class ValidateTests(unittest.TestCase):
         self.assertTrue(self.errs(det(mode="absent", group_by=["host"])))
 
 
-class EvaluateTests(unittest.TestCase):
+class EvaluateTests(IsolatedTestCase):
     def setUp(self):
         self.q = aiops.vl_query
         self.calls = []
@@ -125,7 +124,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertNotIn("off", aiops.DETECTOR_STATUS)
 
 
-class PollTests(unittest.TestCase):
+class PollTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_insert, aiops.send_notification, aiops.CFG["MAX_INCIDENTS_PER_HOUR"])
         self.events, self.sent = [], []
@@ -196,7 +195,7 @@ class PollTests(unittest.TestCase):
         self.assertEqual(list(self.state["recent_alert_keys"]), ["Alert|"])
 
 
-class EvidenceTests(unittest.TestCase):
+class EvidenceTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, aiops.vl_insert, aiops.collect, aiops.build_input, aiops.review_stats, aiops.ollama_chat)
         self.rows = [{"host": "h3", "appname": "plex", "_msg": "Error: boom <N>", "hits": "4"}]
@@ -262,7 +261,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(detectors.group_filter({"host": 'a"b\\c', "bad field": "x"}), 'host:"a\\"b\\\\c"')
 
 
-class BacktestTests(unittest.TestCase):
+class BacktestTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_stats_range, aiops.vl_query)
 
@@ -313,7 +312,7 @@ class BacktestTests(unittest.TestCase):
             detectors.backtest(det(query="a | stats count()"), 24, NOW)
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 
@@ -380,7 +379,7 @@ class ApiTests(unittest.TestCase):
         self.c.put("/api/v1/config/settings", headers=self.A, json={"content": {}})
 
 
-class PollIncidentsRegressionTests(unittest.TestCase):
+class PollIncidentsRegressionTests(IsolatedTestCase):
     def test_two_new_alerts_in_one_poll_are_both_processed(self):
         saved = aiops.vl_query
         rows = [{"_time": "2026-11-16T07:10:00.5Z", "alertname": "A", "alert_root": "", "alert_count": "1", "alerts": "", "_msg": "[FIRING] A"},

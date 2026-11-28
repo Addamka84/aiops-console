@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -20,7 +21,7 @@ EX = os.path.join(HERE, "..", "evalkit", "examples")
 GOOD, BROAD = os.path.join(EX, "known.good.json"), os.path.join(EX, "known.broad.json")
 
 
-class DataTests(unittest.TestCase):
+class DataTests(IsolatedTestCase):
     def test_synth_is_deterministic_and_labeled(self):
         a = synth.generate(seed=5, events_per_day=1500, storms_per_day=3, singles_per_day=10)
         b = synth.generate(seed=5, events_per_day=1500, storms_per_day=3, singles_per_day=10)
@@ -52,7 +53,7 @@ class DataTests(unittest.TestCase):
         self.assertLessEqual(metrics.wilson_upper(100, 100), 1.0)
 
 
-class MetricsTests(unittest.TestCase):
+class MetricsTests(IsolatedTestCase):
     @classmethod
     def setUpClass(cls):
         cls.ev, cls.doc, cls.truth = synth.generate(seed=3, events_per_day=6000, storms_per_day=6, singles_per_day=20)
@@ -144,7 +145,7 @@ class MetricsTests(unittest.TestCase):
         self.assertGreater(r["suppressed"], 0)
 
 
-class CliTests(unittest.TestCase):
+class CliTests(IsolatedTestCase):
     def call(self, argv):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

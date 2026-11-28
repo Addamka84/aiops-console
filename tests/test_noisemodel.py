@@ -3,6 +3,7 @@ must_keep mintasor es ismert ugy soha nem kap "valoszinuleg zaj" jelzest. Csak t
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -26,7 +27,7 @@ def corpus(n_noise=240, n_imp=80):
     return rows
 
 
-class NoiseModelTests(unittest.TestCase):
+class NoiseModelTests(IsolatedTestCase):
     def setUp(self):
         self.known = aiops.Known(data=KNOWN)
         self.mk = ["h1 | svc-1 | heartbeat lost to storage controller <N>"]   # szandekosan "zaj-szavas" kritikus sor
@@ -80,7 +81,7 @@ class NoiseModelTests(unittest.TestCase):
         self.assertLess((time.perf_counter() - t0) / 2000, 0.002)  # <2 ms / sablon (tipikusan ~10 us)
 
 
-class AdvisorApiTests(unittest.TestCase):
+class AdvisorApiTests(IsolatedTestCase):
     """A novelty API: a leleteken noise_score / likely_noise, es az advisor allapota; modell nelkul a lelet valtozatlan."""
     R = {"Authorization": "Bearer r-token"}
 

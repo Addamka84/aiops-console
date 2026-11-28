@@ -3,6 +3,7 @@ Az operator a napi uzemeltetest vegzi (incidens, visszajatszas, karbantartas, le
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -21,7 +22,7 @@ def hdr(role):
     return {"Authorization": "Bearer " + TOK[role], "X-Actor": "tester"}
 
 
-class OperatorRole(unittest.TestCase):
+class OperatorRole(IsolatedTestCase):
     def setUp(self):
         import console
         import runtime
@@ -98,7 +99,7 @@ class OperatorRole(unittest.TestCase):
         self.assertIn("admin token required", self.c.get("/api/v1/audit", headers=hdr("operator")).text)
 
 
-class TokenSetup(unittest.TestCase):
+class TokenSetup(IsolatedTestCase):
     def app(self, tokens):
         import console
         import runtime

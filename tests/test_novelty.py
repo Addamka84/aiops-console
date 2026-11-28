@@ -4,6 +4,7 @@ Futtatas (a stacks/aiops-console mappabol): python3 -m unittest discover -s test
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -20,7 +21,7 @@ def known(noise=()):
     return aiops.Known(data={"noise": list(noise), "known_issues": [], "context": []})
 
 
-class Base(unittest.TestCase):
+class Base(IsolatedTestCase):
     def setUp(self):
         self._orig_q = aiops.vl_query
         self._cfg = dict(aiops.CFG)

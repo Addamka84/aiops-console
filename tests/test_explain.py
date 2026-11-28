@@ -3,6 +3,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -28,7 +29,7 @@ def outcome(r):
     return r["verdict"]["outcome"]
 
 
-class RuleTests(unittest.TestCase):
+class RuleTests(IsolatedTestCase):
     def test_noise_rule_named(self):
         r = aiops.explain_line(known(), "homesrv", "avahi-daemon", "Joining mDNS multicast group on interface eth0.IPv4 with address 192.0.2.10.",
                                "syslog", "notice", now=NOW)
@@ -64,7 +65,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(outcome(r), "reaches_model")
 
 
-class LevelTests(unittest.TestCase):
+class LevelTests(IsolatedTestCase):
     def test_levels(self):
         self.assertEqual(aiops.level_gate("syslog", "info", "x")[0], False)
         self.assertEqual(aiops.level_gate("syslog", "Error", "x")[0], True)
@@ -90,7 +91,7 @@ def srow(host, app, msg, hits, last="2026-11-25T08:00:00Z"):
     return {"host": host, "appname": app, "severity": "err", "_msg": msg, "hits": str(hits), "first": "2026-11-24T10:00:00Z", "last": last}
 
 
-class LiveTests(unittest.TestCase):
+class LiveTests(IsolatedTestCase):
     def raw(self, n_before):
         a = [srow("h", f"app{i}", f"error number <N> in module {i}", 1000 - i) for i in range(n_before)]
         a.append(srow("homesrv", "backup", "job <N> failed: target unreachable", 5))
@@ -179,7 +180,7 @@ class LiveTests(unittest.TestCase):
         self.assertIn("top 8 containers", r["verdict"]["summary"])
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
 
     def setUp(self):

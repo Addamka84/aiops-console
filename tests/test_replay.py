@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -33,7 +34,7 @@ def head(**kw):
     return h
 
 
-class JobMetaTests(unittest.TestCase):
+class JobMetaTests(IsolatedTestCase):
     def test_roundtrip(self):
         meta = aiops.job_meta(JOB)
         self.assertNotIn("abc123secretvalue", meta)                       # a riasztas szovege is redaktalva
@@ -90,7 +91,7 @@ class JobMetaTests(unittest.TestCase):
             aiops.job_from_head({"kind": "heartbeat", "window": "2026-11-24T06:30:00Z..2026-11-25T06:30:00Z"})
 
 
-class RunJobReplayTests(unittest.TestCase):
+class RunJobReplayTests(IsolatedTestCase):
     def setUp(self):
         aiops.CFG.update(PROBE_TIMEOUT=1, GEN_TIMEOUT=5, BACKOFF_MIN=2, BACKOFF_MAX=8)
         self.saved_url = aiops.CFG["VL_URL"]
@@ -140,7 +141,7 @@ def recent(days_ago=1):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ"), (t + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class ReplayApiTests(unittest.TestCase):
+class ReplayApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 

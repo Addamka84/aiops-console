@@ -88,7 +88,7 @@ def _funnel(sup, cor, gated):
 def render(res):
     """res: {sup, tpl, cor, gated, root, groot, tp, storm, change (opcionalis compare-eredmeny + cimkek), title, meta}"""
     sup, cor, gated, tpl, tp = res["sup"], res["cor"], res["gated"], res["tpl"], res["tp"]
-    root, groot, storm, change = res.get("root") or {}, res.get("groot") or {}, res.get("storm"), res.get("change")
+    groot, storm, change = res.get("groot") or {}, res.get("storm"), res.get("change")
     gate_ok = sup["gate_pass"] and cor["incident_coverage_gate"]
     tiles = [
         _tile(_num(sup["events"]), "raw events in the data set"),

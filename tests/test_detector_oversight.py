@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -25,7 +26,7 @@ def finding(host="h1", ident="agent", level="err", tmpl="Connection to <N> lost:
             "level": level, "tmpl": tmpl, "hits": hits, "baseline": 0}
 
 
-class HealthTests(unittest.TestCase):
+class HealthTests(IsolatedTestCase):
     def test_flags(self):
         dets = [dict(DRAFT), {"id": "on-quiet", "query": "a"}, {"id": "on-noisy", "query": "b"}, {"id": "off", "query": "c", "enabled": False, "note": "mine"},
                 {"id": "broken", "query": "d"}]
@@ -46,7 +47,7 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(any("fired 31 times in 30 days" in t for t in titles), titles)
 
 
-class FindingDraftTests(unittest.TestCase):
+class FindingDraftTests(IsolatedTestCase):
     def test_draft_uses_host_ident_and_longest_constant_phrase(self):
         d, q = supervisor.finding_detector_draft(finding())
         self.assertEqual(q, 'host:=h1 appname:=agent pipeline:syslog "lost: remote end closed the socket"')
@@ -75,7 +76,7 @@ class FindingDraftTests(unittest.TestCase):
         self.assertEqual(q, "host:=h1 appname:=agent pipeline:syslog")
 
 
-class CoverageCandidatesTests(unittest.TestCase):
+class CoverageCandidatesTests(IsolatedTestCase):
     def test_error_level_novelty_findings_become_candidates(self):
         store = Store()
         store.nov_add_findings([finding(host="cam1", ident="motors-daemon", level="err", tmpl="motor stalled <N>"),
@@ -91,7 +92,7 @@ class CoverageCandidatesTests(unittest.TestCase):
         self.assertTrue(inp["items"][0]["filter"].startswith("host:=cam1 appname:=motors-daemon"))
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 

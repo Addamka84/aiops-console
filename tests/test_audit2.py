@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -24,7 +25,7 @@ from redact import redact  # noqa: E402
 from store import Store  # noqa: E402
 
 
-class H1RegexGuardTests(unittest.TestCase):
+class H1RegexGuardTests(IsolatedTestCase):
     def setUp(self):
         regex_guard._OK.clear()
 
@@ -68,7 +69,7 @@ class H1RegexGuardTests(unittest.TestCase):
         self.assertIn("too broad", supervisor.check_noise_regex(r"session opened for user root", ["h | sshd | session opened for user root"], []) or "")
 
 
-class M1M2M3QueryAndRuleTests(unittest.TestCase):
+class M1M2M3QueryAndRuleTests(IsolatedTestCase):
     def test_parentheses_cannot_close_the_wrapper(self):
         for q in ("x) OR (y", "*) OR (*", "a) (b"):
             self.assertIsNotNone(detectors.check_query(q), q)
@@ -88,7 +89,7 @@ class M1M2M3QueryAndRuleTests(unittest.TestCase):
             self.assertTrue(rules.validate({"rules": [{"id": "X", "kind": "count", "query": "*", "group_by": [f]}]}), f)
 
 
-class M5EvidenceTests(unittest.TestCase):
+class M5EvidenceTests(IsolatedTestCase):
     def setUp(self):
         self.saved = aiops.vl_query
         self.k = aiops.Known(data={"noise": [r"noisy"], "context": [], "known_issues": []})
@@ -114,7 +115,7 @@ class M5EvidenceTests(unittest.TestCase):
         self.assertIsNone(self.ev([{"_msg": "noisy crit", "hits": "1", "prio": "2"}]))
 
 
-class L1KnownTests(unittest.TestCase):
+class L1KnownTests(IsolatedTestCase):
     def test_catch_all_known_issue_is_rejected(self):
         for m in (".", ".*", "error|fail", "(?i)e"):
             errs = aiops.validate_known({"known_issues": [{"id": "k", "note": "n", "match": m}]})
@@ -128,7 +129,7 @@ class L1KnownTests(unittest.TestCase):
         self.assertEqual(aiops.validate_known({"snoozes": [{"id": "s", "regex": "foo bar baz", "until": near}]}), [])
 
 
-class M6ProposalAndAuditTests(unittest.TestCase):
+class M6ProposalAndAuditTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token-0123456789-0123456789-0123"}
 
     def setUp(self):
@@ -160,7 +161,7 @@ class M6ProposalAndAuditTests(unittest.TestCase):
         self.assertEqual(len(s.audit_list(5000)), 2491)
 
 
-class M11RedactTests(unittest.TestCase):
+class M11RedactTests(IsolatedTestCase):
     def test_enterprise_secret_shapes(self):
         for raw, secret in (("AccountName=a;AccountKey=abc/DEF+ghi==;EndpointSuffix=x", "abc/DEF"), ("?sv=1&sig=AbC%2Fdef%3D&se=1", "AbC%2F"),
                             ("Server=db;Pwd=hunter2;", "hunter2"), ("login pass=secret123 ok", "secret123"),
@@ -175,7 +176,7 @@ class M11RedactTests(unittest.TestCase):
             self.assertEqual(redact(t), t)
 
 
-class M7KeyBindingTests(unittest.TestCase):
+class M7KeyBindingTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (dict(aiops.CFG), dict(aiops.ENV_CFG))
         aiops.ENV_CFG["OLLAMA_URLS"] = ["http://llm.internal:11434"]
@@ -200,7 +201,7 @@ class M7KeyBindingTests(unittest.TestCase):
         self.assertEqual(settings.validate({"OLLAMA_URLS": ["http://gpu2.internal:11434", "http://llm.internal:11434"]})[1], [])
 
 
-class VlQueryLimitTests(unittest.TestCase):
+class VlQueryLimitTests(IsolatedTestCase):
     def test_response_size_cap(self):
         from test_aiops import start
         from http.server import BaseHTTPRequestHandler

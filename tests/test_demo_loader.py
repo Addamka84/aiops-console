@@ -6,6 +6,7 @@ import random
 import sys
 import threading
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -36,7 +37,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class LoaderTests(unittest.TestCase):
+class LoaderTests(IsolatedTestCase):
     @classmethod
     def setUpClass(cls):
         cls.srv = http.server.HTTPServer(("127.0.0.1", 0), Stub)

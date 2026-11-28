@@ -121,7 +121,7 @@ def stream(items, topo, settle=90, window_s=600, max_pending=1500):
         nonlocal pending
         if not pending or (not force and now - min(it["ts"] for it in pending) < settle):
             return
-        keep, gone = [], set()
+        gone = set()
         for g in correlation.cluster(topo, pending, window_s=window_s):
             newest, oldest = max(pending[i]["ts"] for i in g), min(pending[i]["ts"] for i in g)
             if force or now - newest >= settle or now - oldest >= 4 * settle:

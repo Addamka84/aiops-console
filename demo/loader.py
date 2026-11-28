@@ -175,7 +175,6 @@ def cmd_novel(a):
 
 
 def cmd_live(a):
-    topo = topology.Topology(synth.build_topology())
     rng, n = random.Random(a.seed), 0
     print(f"elo folyam (sebesseg {a.speed}x): ~{a.events_per_day / 86400 * a.speed:.2f} esemeny/s; Ctrl+C a leallitashoz")
     while True:

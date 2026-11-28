@@ -5,6 +5,7 @@ import copy
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -34,7 +35,7 @@ def errs(doc):
     return topology.validate(doc)
 
 
-class ValidateTests(unittest.TestCase):
+class ValidateTests(IsolatedTestCase):
     def test_valid_document_and_empty_document(self):
         self.assertEqual(errs(DOC), [])
         self.assertEqual(errs({}), [])
@@ -78,7 +79,7 @@ class ValidateTests(unittest.TestCase):
         topology.Topology({"assets": [a, b]}).section(["a"])  # nem akad vegtelen ciklusba
 
 
-class MatchTests(unittest.TestCase):
+class MatchTests(IsolatedTestCase):
     def setUp(self):
         self.t = topology.Topology(DOC)
 
@@ -104,7 +105,7 @@ class MatchTests(unittest.TestCase):
         self.assertEqual((e.match(["anything"]), e.section([])), ([], []))
 
 
-class SectionTests(unittest.TestCase):
+class SectionTests(IsolatedTestCase):
     def setUp(self):
         self.t = topology.Topology(DOC)
 
@@ -166,7 +167,7 @@ class SectionTests(unittest.TestCase):
         self.assertEqual(self.t.section(["ghost"]), [])
 
 
-class CoverageTests(unittest.TestCase):
+class CoverageTests(IsolatedTestCase):
     def test_unknown_and_silent(self):
         t = topology.Topology(DOC)
         seen = [{"name": "homesrv", "kind": "host", "lines": 100}, {"name": "HOMENAS2", "kind": "host", "lines": 5},
@@ -178,7 +179,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(sorted(s["id"] for s in c["silent"]), ["adguard", "homesrv3"])  # a switch (network) nem 'csendes'
 
 
-class InputTests(unittest.TestCase):
+class InputTests(IsolatedTestCase):
     def setUp(self):
         self.saved = aiops.TOPOLOGY
         self.raw = {"a": [], "b": [{"_HOSTNAME": "homenas2", "SYSLOG_IDENTIFIER": "kernel", "_msg": "nfs trouble", "hits": "3"}],
@@ -240,7 +241,7 @@ class InputTests(unittest.TestCase):
         self.assertIn("ONLY along a dependency path", seen[1])
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 

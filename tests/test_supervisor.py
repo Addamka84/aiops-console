@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import unittest
+from _base import IsolatedTestCase
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +25,7 @@ ALERTS = [{"_time": "2026-11-17T01:00:00Z", "_msg": "[FIRING] HomeAssistantError
          [{"_time": "2026-11-17T02:00:00Z", "_msg": "[FIRING] DiskSmartFailed x1 Lemez SMART hiba"}]
 
 
-class Base(unittest.TestCase):
+class Base(IsolatedTestCase):
     def setUp(self):
         self.store = Store()
         self._vl = aiops.vl_query
@@ -55,7 +56,7 @@ class FakeModel:
         return json.dumps(self.content if self.content is not None else {"summary": "fine", "findings": []}), self.tokens
 
 
-class RedactTests(unittest.TestCase):
+class RedactTests(IsolatedTestCase):
     def test_secrets_removed(self):
         t = ("GET https://x/y?Expires=1&OSSAccessKeyId=LTAI5tAAAAAAAAAAAAAAAA&Signature=abc%2Bdef%3D done; "
              'Authorization: Bearer abcdef1234567890xyz; {"password": "hunter2", "name": "ok"}; token=s3cr3tvalue; '
@@ -75,7 +76,7 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(o, {"a": ["token=<redacted>"], "n": 5})
 
 
-class ParseTests(unittest.TestCase):
+class ParseTests(IsolatedTestCase):
     def test_only_whitelisted_keys_survive(self):
         out = supervisor.parse_report(json.dumps({
             "summary": "s", "proposals": [{"key": "known", "patch": {"add_noise": [".*"]}}],
@@ -436,7 +437,7 @@ HEAD = {"_time": "2026-11-17T03:00:00Z", "id": "incident-2026-11-17T03:00:00Z", 
 ISSUE = {"parent": "incident-2026-11-17T03:00:00Z", "title": "T", "severity": "high", "hosts": "homesrv", "evidence": "ev", "likely_cause": "lc"}
 
 
-class PromptTests(unittest.TestCase):
+class PromptTests(IsolatedTestCase):
     """A hangolt promptok kulcselemei (az elo merest a scripts-mappa nelkul, a regresszio ellen)."""
 
     def test_incident_review_prompt_does_not_punish_empty_root(self):
@@ -1106,7 +1107,7 @@ class SummaryTests(Base):
         self.assertTrue(any("NOT a number of findings" in n for n in snap["notes"]))
 
 
-class SettingsTests(unittest.TestCase):
+class SettingsTests(IsolatedTestCase):
     def test_validation(self):
         ok, errs = settings.validate({"SUPERVISOR_MODE": "report", "SUPERVISOR_URL": "https://gpu.example:8000/", "SUPERVISOR_MODEL": "qwen-big",
                                       "SUPERVISOR_INTERVAL_MIN": 60})

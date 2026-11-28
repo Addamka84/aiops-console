@@ -1,0 +1,30 @@
+name: nightly
+
+# Flaky-test hunt: the whole suite three times in a row, every night, so a test that fails only sometimes shows up here
+# and not on a release tag. Every test also fails if it leaves a thread running (tests/_base.py).
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - name: run 1
+        run: python -m unittest discover -s tests
+      - name: run 2
+        if: always()
+        run: python -m unittest discover -s tests
+      - name: run 3
+        if: always()
+        run: python -m unittest discover -s tests

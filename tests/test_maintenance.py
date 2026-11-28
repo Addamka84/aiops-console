@@ -3,6 +3,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -29,7 +30,7 @@ def win(**kw):
     return w
 
 
-class ValidateTests(unittest.TestCase):
+class ValidateTests(IsolatedTestCase):
     def test_valid(self):
         self.assertEqual(maintenance.validate({"windows": [win()]}, TOPO), [])
         self.assertEqual(maintenance.validate({"windows": [win(targets=["srv-main"])]}, TOPO), [])     # alias is jo
@@ -49,7 +50,7 @@ class ValidateTests(unittest.TestCase):
         self.assertIn("homesrv3", maintenance.expanded(TOPO, win(targets=["homenas2"]))[0])        # tarolas-fuggo is
 
 
-class MatchTests(unittest.TestCase):
+class MatchTests(IsolatedTestCase):
     def setUp(self):
         maintenance.set_active({"windows": [win(), win(id="later", targets=["homenas2"], start="2026-11-25T14:00:00Z", end="2026-11-25T15:00:00Z")]})
 
@@ -70,7 +71,7 @@ class MatchTests(unittest.TestCase):
         self.assertIsNone(maintenance.match(None, "nihilist", now=NOW))
 
 
-class PollTests(unittest.TestCase):
+class PollTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, dict(aiops.CFG), aiops.TOPOLOGY)
         rows = [{"_time": "2026-11-25T12:00:01.1Z", "alertname": "JournaldCritical", "alert_root": "", "_msg": "[FIRING] JournaldCritical: homesrv / x", "alerts": ""},
@@ -104,7 +105,7 @@ class PollTests(unittest.TestCase):
         self.assertEqual(st["recent_alert_keys"], {})
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     A = {"Authorization": "Bearer a-token"}
     R = {"Authorization": "Bearer r-token"}
 

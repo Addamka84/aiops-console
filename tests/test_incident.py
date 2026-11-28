@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -33,7 +34,7 @@ class Pool:
         pass
 
 
-class Base(unittest.TestCase):
+class Base(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, aiops.vl_insert, aiops.collect, aiops.build_input, aiops.review_stats, aiops.ollama_chat)
         self.queries, self.inserted, self.extra = [], [], []
@@ -62,7 +63,7 @@ class Base(unittest.TestCase):
                     alert_labels=labels if labels is not None else aiops.alert_labels(ALERTS, "JournaldCritical"))
 
 
-class AlertLabelTests(unittest.TestCase):
+class AlertLabelTests(IsolatedTestCase):
     def test_labels_are_parsed_and_limited(self):
         self.assertEqual(aiops.alert_labels(ALERTS, "JournaldCritical"),
                          [{"alertname": "JournaldCritical", "host": "homesrv3", "SYSLOG_IDENTIFIER": "kernel", "severity": "warning"}])

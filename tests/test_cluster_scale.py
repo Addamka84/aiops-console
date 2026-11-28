@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -40,7 +41,7 @@ def grouped_items(rng, ids, window):
     return items
 
 
-class EquivalenceTests(unittest.TestCase):
+class EquivalenceTests(IsolatedTestCase):
     def assert_same(self, topo, items, window, fanout=25):
         self.assertEqual(correlation.cluster(topo, items, window, fanout), correlation.cluster_pairwise(topo, items, window, fanout))
 
@@ -91,7 +92,7 @@ class EquivalenceTests(unittest.TestCase):
             self.assertEqual(correlation.relation(topo, a, b), correlation.relation(topo, a, b, 25, cache))
 
 
-class ScalingTests(unittest.TestCase):
+class ScalingTests(IsolatedTestCase):
     def test_relation_calls_do_not_grow_with_the_number_of_items(self):
         # determinisztikus (nem idomeres): a termelesi vihar sok eleme kevés kulonbozo eszkozhalmazon -> a reláció-szamitasok szama a halmazokon, nem az elemeken mulik
         topo = topology.Topology(synth.build_topology())

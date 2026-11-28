@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from _base import IsolatedTestCase
 
 from fastapi.testclient import TestClient
 
@@ -20,7 +21,7 @@ from store import Store  # noqa: E402
 from evalkit import run, schema  # noqa: E402
 
 
-class IngestTests(unittest.TestCase):
+class IngestTests(IsolatedTestCase):
     def test_defaults_per_tool_and_generic_names(self):
         c = ingest.Config()
         self.assertEqual(c.level("dynatrace", "AVAILABILITY"), ("critical", True))
@@ -107,7 +108,7 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(run.main(["import", "--source", "dynatrace", "--input", src, "--out", out, "--adapter", ad]), 1)
 
 
-class IngestApiTests(unittest.TestCase):
+class IngestApiTests(IsolatedTestCase):
     """A REST API: hatályos leképezés, próba (mentés nélkül), mentés + hot reload, és a must_keep elutasítás üzenete."""
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}

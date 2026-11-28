@@ -6,8 +6,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/data
 
 WORKDIR /app
+
+# Debian security updates on top of the base image (the base tag is rebuilt upstream only from time to time).
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip is needed only to install; removing it also removes its vendored libraries (msgpack, urllib3, pkg_resources),
+# which the image scan would otherwise report. The console never installs anything at runtime.
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip uninstall -y pip \
+ && rm -rf /usr/local/lib/python3.13/ensurepip
 
 COPY src/ /app/
 

@@ -4,6 +4,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -46,7 +47,7 @@ def run(issues, rows=(), raw=RAW, topo=TOPO):
     return aiops.guard_monitor_hosts(issues, list(rows), raw, topo)
 
 
-class Targets(unittest.TestCase):
+class Targets(IsolatedTestCase):
     def test_alias_ip_container_and_hook(self):
         tg, own = aiops.kuma_targets(RAW, TOPO)
         d = dict(tg)
@@ -66,7 +67,7 @@ class Targets(unittest.TestCase):
         self.assertEqual(aiops.kuma_targets({}, TOPO)[0], [])
 
 
-class GuardMonitorHosts(unittest.TestCase):
+class GuardMonitorHosts(IsolatedTestCase):
     def test_kuma_host_replaced_by_target(self):
         out, notes = run([iss("GameSRV - CS1.6 Monitor Down", ["srv1"])])
         self.assertEqual(out[0]["hosts"], ["gamebox"])
@@ -108,7 +109,7 @@ class GuardMonitorHosts(unittest.TestCase):
         self.assertEqual((out[0]["severity"], out[0]["status"]), ("high", "ongoing"))
 
 
-class TuyaSymptom(unittest.TestCase):
+class TuyaSymptom(IsolatedTestCase):
     U = "ha | tuya_local | 4x | Failed to refresh device state for LED-<N>mPC. Device reported erro...\n"
 
     def basis(self, q):
@@ -127,7 +128,7 @@ class TuyaSymptom(unittest.TestCase):
         self.assertEqual(aiops.guard_cause([i], u)[0][0]["cause_basis"], "log")
 
 
-class AlertTextSymptom(unittest.TestCase):
+class AlertTextSymptom(IsolatedTestCase):
     def test_firing_alert_quote_is_symptom(self):
         u = "== Kuma and alert events:\n[FIRING] KumaMonitorDown x1 Uptime Kuma: Speaker-Bedroom LE ALLT\n"
         i = iss("Speaker down", [])
@@ -135,7 +136,7 @@ class AlertTextSymptom(unittest.TestCase):
         self.assertEqual(aiops.guard_cause([i], u)[0][0]["cause_basis"], "symptom")
 
 
-class Wiring(unittest.TestCase):
+class Wiring(IsolatedTestCase):
     def test_run_job_calls_guard(self):
         import inspect
         self.assertIn("guard_monitor_hosts(issues, rows, raw, TOPOLOGY)", inspect.getsource(aiops.run_job))

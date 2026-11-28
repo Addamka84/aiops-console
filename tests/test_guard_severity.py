@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -22,7 +23,7 @@ def issue(sev="critical", title="Network Connectivity Failure on nihil (Producti
 USER = "nihil | sshd-session | 1x | error: kex_exchange_identification: read: Connection reset by peer"
 
 
-class GuardTests(unittest.TestCase):
+class GuardTests(IsolatedTestCase):
     def setUp(self):
         self.vocab = aiops.vocabulary(K())
 

@@ -3,6 +3,7 @@ javaslatok a feluleten nem voltak elerhetok."""
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -15,7 +16,7 @@ import runtime  # noqa: E402
 from store import Store  # noqa: E402
 
 
-class ProposalPagingTests(unittest.TestCase):
+class ProposalPagingTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
 
     def setUp(self):

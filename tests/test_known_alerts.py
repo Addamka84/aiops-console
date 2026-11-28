@@ -3,6 +3,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -17,7 +18,7 @@ ISSUE = {"id": "homenas2-sdb-smart", "note": "sdb SMART failing, replacement pen
          "match_alert": r"DiskSmartFailed.*homenas2.*HD105SI"}
 
 
-class ValidateTests(unittest.TestCase):
+class ValidateTests(IsolatedTestCase):
     def test_specific_match_alert_accepted(self):
         self.assertEqual(aiops.validate_known({"known_issues": [ISSUE]}), [])
 
@@ -39,7 +40,7 @@ class ValidateTests(unittest.TestCase):
         self.assertIsNone(plain.alert_issue(SMART))                                     # match_alert nelkul a riasztas feldolgozodik
 
 
-class PollTests(unittest.TestCase):
+class PollTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, dict(aiops.CFG))
         rows = [{"_time": "2026-11-25T08:03:54.687734Z", "alertname": "JournaldCritical", "alert_root": "", "_msg": PULSE, "alerts": ""},

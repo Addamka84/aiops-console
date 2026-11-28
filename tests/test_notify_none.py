@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -19,7 +20,7 @@ def alerts(*notifies):
     return json.dumps([{"labels": ({"alertname": "A", "host": "h"} | ({"notify": n} if n is not None else {}))} for n in notifies])
 
 
-class LogOnlyTests(unittest.TestCase):
+class LogOnlyTests(IsolatedTestCase):
     def test_all_alerts_must_be_none(self):
         self.assertTrue(aiops.alerts_log_only(alerts("none")))
         self.assertTrue(aiops.alerts_log_only(alerts("none", "NONE")))
@@ -33,7 +34,7 @@ class LogOnlyTests(unittest.TestCase):
             self.assertFalse(aiops.alerts_log_only(v), v)
 
 
-class PollTests(unittest.TestCase):
+class PollTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (aiops.vl_query, aiops.vl_insert, dict(aiops.STATUS))
         aiops.vl_insert = lambda rows: None

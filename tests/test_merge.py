@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -10,7 +11,6 @@ sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-import aiops  # noqa: E402
 import console  # noqa: E402
 import runtime  # noqa: E402
 import settings  # noqa: E402
@@ -18,7 +18,7 @@ from merge import merge3  # noqa: E402
 from store import Store, StoreError  # noqa: E402
 
 
-class Merge3Tests(unittest.TestCase):
+class Merge3Tests(IsolatedTestCase):
     def test_unchanged_and_one_sided(self):
         self.assertEqual(merge3({"a": 1}, {"a": 2}, {"a": 1}), ({"a": 2}, []))      # a javaslat nem nyult hozza
         self.assertEqual(merge3({"a": 1}, {"a": 1}, {"a": 5}), ({"a": 5}, []))      # az aktualis nem valtozott
@@ -74,7 +74,7 @@ class Merge3Tests(unittest.TestCase):
         self.assertEqual((repr(base), repr(cur), repr(prop)), snapshot)
 
 
-class StoreMergeTests(unittest.TestCase):
+class StoreMergeTests(IsolatedTestCase):
     def setUp(self):
         self.s = Store()
         self.s.put("known", {"noise": ["x"]}, "seed")
@@ -114,7 +114,7 @@ class StoreMergeTests(unittest.TestCase):
         self.assertEqual((mp["stale"], mp["merged"]), (False, {"noise": ["x", "y"]}))
 
 
-class ApiMergeTests(unittest.TestCase):
+class ApiMergeTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 

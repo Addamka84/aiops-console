@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import unittest
+from _base import IsolatedTestCase
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -60,7 +61,7 @@ def fake_openai(models=("big-model",), content=None, calls=None, reject_schema=F
     return H
 
 
-class OpenAITests(unittest.TestCase):
+class OpenAITests(IsolatedTestCase):
     def setUp(self):
         self.saved = dict(aiops.CFG)
         aiops.CFG.update({"LLM_API": "openai", "MODEL": "big-model", "PROBE_TIMEOUT": 2, "GEN_TIMEOUT": 5, "LLM_API_KEY": "",
@@ -168,7 +169,7 @@ class OpenAITests(unittest.TestCase):
         self.assertEqual(calls[0][0], "/api/chat")
 
 
-class KumaLabelTests(unittest.TestCase):
+class KumaLabelTests(IsolatedTestCase):
     def test_the_monitor_label_is_kept_and_resolves_through_a_topology_alias(self):
         import topology
         labs = aiops.alert_labels(json.dumps([{"labels": {"alertname": "KumaMonitorDown", "monitor": "GameSRV - CS1.6", "severity": "warning", "junk": "x"}}]))
@@ -184,7 +185,7 @@ class KumaLabelTests(unittest.TestCase):
         self.assertEqual(st["alert_items"][0]["cis"], ["nihil"])
 
 
-class FlappingTests(unittest.TestCase):
+class FlappingTests(IsolatedTestCase):
     def setUp(self):
         self.saved = dict(aiops.CFG)
         aiops.CFG.update({"FLAP_COUNT": 4, "FLAP_WINDOW_H": 6, "FLAP_COOLDOWN_MIN": 180})

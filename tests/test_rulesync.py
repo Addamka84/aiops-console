@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from _base import IsolatedTestCase
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -95,7 +96,7 @@ def rule(**kw):
     return r
 
 
-class SyncCase(unittest.TestCase):
+class SyncCase(IsolatedTestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.vm = FakeVmalert(self.dir)

@@ -5,6 +5,7 @@ import datetime as dt
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -29,7 +30,7 @@ HA_SUMMARY = ("Home Assistant cannot convert sensor state strings to floats, cau
               "Separately, the RomM database on the NAS shows transient I/O errors falling back from io_uring, which is minor.")
 
 
-class AnchorTests(unittest.TestCase):
+class AnchorTests(IsolatedTestCase):
     def test_alertname_and_text(self):
         a = aiops.incident_anchors(HA_JOB)
         self.assertIn("homeassistant", a)
@@ -50,7 +51,7 @@ class AnchorTests(unittest.TestCase):
         self.assertIn("adguard-adguardhome-1", aiops.incident_anchors(job))
 
 
-class TopologyAnchorTests(unittest.TestCase):
+class TopologyAnchorTests(IsolatedTestCase):
     def setUp(self):
         import topology
         self.old = aiops.TOPOLOGY
@@ -74,7 +75,7 @@ class TopologyAnchorTests(unittest.TestCase):
         self.assertEqual([i["title"] for i in side], ["Tuya refresh failed"])
 
 
-class FocusTests(unittest.TestCase):
+class FocusTests(IsolatedTestCase):
     def test_ha_romm_case(self):
         issues = [issue("high", "Home Assistant State Conversion Failure", ["homeassistant"], evidence="360x ValueError in entity.py"),
                   issue("low", "RomM Database I/O Fallback", ["homenas2"], evidence="2 error-like lines in romm-db")]
@@ -115,7 +116,7 @@ class FocusTests(unittest.TestCase):
         self.assertEqual(summary, s)
 
 
-class ResolvedTests(unittest.TestCase):
+class ResolvedTests(IsolatedTestCase):
     def test_resolved_capped_low(self):
         out, notes = aiops.guard_resolved([issue("medium", "Backup job failed", ["homesrv"], status="resolved")], [])
         self.assertEqual(out[0]["severity"], "low")

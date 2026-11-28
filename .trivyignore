@@ -1,0 +1,4 @@
+# Image-scan exceptions (Trivy). The scan blocks the build on any HIGH/CRITICAL finding that has a fix.
+# Add an entry only when the fix cannot be taken yet; each entry needs a reason and a review date, e.g.:
+#   CVE-YYYY-NNNNN  # reason: not reachable (component X unused); review by YYYY-MM-DD
+# Expired entries are removed at the next release.

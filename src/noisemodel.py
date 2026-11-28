@@ -8,7 +8,6 @@ A vedelmeket (must_keep kapu, ismert ugyek, hibaszintu sorok) nem kerüli meg, h
   visszatartott FONTOS sorok es a must_keep mintasorok legnagyobb pontszama. Csak az eleri a "valoszinuleg zaj" jelzest, ami tau FOLOTT van.
 - tovabbi tiltas: hiba-szintu sor, must_keep mintasorral azonos sor, vagy ismert ugyre illeszkedo sor soha nem kap jelzest.
 Merese (valos adaton, 50 kezi cimke): lasd docs/aiops-merokeret.md."""
-import collections
 import hashlib
 import math
 import re
@@ -162,7 +161,7 @@ class Advisor:
             rows = self.store.nov_training_rows(MAX_TRAIN)
             m = train(rows, known, doc.get("must_keep", []))
             self.m, self._rev, self.error = m, rev, ""
-            aiops.log(f"zaj-tanacsado: " + (f"kesz (zaj {m['n_noise']}, fontos {m['n_important']}, tau {m['tau']:.1f}, {m['cv_secs']} mp)" if m.get("ready") else m["reason"]))
+            aiops.log("zaj-tanacsado: " + (f"kesz (zaj {m['n_noise']}, fontos {m['n_important']}, tau {m['tau']:.1f}, {m['cv_secs']} mp)" if m.get("ready") else m["reason"]))
         except Exception as e:  # noqa: BLE001 - a tanacsado hibaja nem allithatja meg a szolgaltatast
             self.error = f"{type(e).__name__}: {e}"[:200]
         finally:

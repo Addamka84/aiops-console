@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -17,7 +18,7 @@ from test_aiops import make_ollama, start  # noqa: E402
 MODEL = "qwen3.5:9b"
 
 
-class CheckAllTests(unittest.TestCase):
+class CheckAllTests(IsolatedTestCase):
     def setUp(self):
         self.saved = dict(aiops.CFG)
         aiops.CFG.update(PROBE_TIMEOUT=1, ENDPOINT_CHECK_S=60)
@@ -96,7 +97,7 @@ class CheckAllTests(unittest.TestCase):
         self.assertEqual((pool.eps[0]["state"], pool.eps[0]["fails"]), ("down", 1))   # ismetelt ellenorzes nem huzza a visszalepest
 
 
-class TickTests(unittest.TestCase):
+class TickTests(IsolatedTestCase):
     def setUp(self):
         self.saved = (dict(aiops.CFG), aiops.POOL, dict(aiops._CHECK), list(aiops.STATUS.get("endpoints") or []))
         aiops.CFG.update(PROBE_TIMEOUT=1, ENDPOINT_CHECK_S=60)
@@ -146,7 +147,7 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
 
 
-class SettingTests(unittest.TestCase):
+class SettingTests(IsolatedTestCase):
     def test_spec_and_range(self):
         self.assertEqual((settings.SPEC["ENDPOINT_CHECK_S"]["min"], settings.SPEC["ENDPOINT_CHECK_S"]["max"]), (15, 600))
         for v in (15, 60, 600):

@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STATE_FILE", os.path.join(os.environ.get("TEMP", "/tmp"), "aiops-test-state.json"))
@@ -17,7 +18,7 @@ import supervisor  # noqa: E402
 from redact import redact, redact_obj  # noqa: E402
 
 
-class RedactModuleTests(unittest.TestCase):
+class RedactModuleTests(IsolatedTestCase):
     def test_supervisor_uses_the_shared_module(self):
         self.assertIs(supervisor.redact, redact)
         self.assertIs(supervisor.redact_obj, redact_obj)
@@ -52,7 +53,7 @@ class RedactModuleTests(unittest.TestCase):
         self.assertEqual(out["issues"][0]["hosts"], ["h"])
 
 
-class RegexGuardTests(unittest.TestCase):
+class RegexGuardTests(IsolatedTestCase):
     def test_catastrophic_regexes_are_rejected_quickly(self):
         t = time.monotonic()
         for rx in (r"(a|aa)+\s+Connection reset by peer", r"(a+)+$", r"(.*a){12} end", r"(x+x+)+y"):   # (\w|\d)+ NEM jo pelda: a CPython egy karakterosztalyba vonja
@@ -110,7 +111,7 @@ class RegexGuardTests(unittest.TestCase):
         self.assertEqual(aiops.validate_known({"noise": [r"\| avahi-daemon \| (Withdrawing|Registering) address record"]}), [])
 
 
-class CoverageShapeTests(unittest.TestCase):
+class CoverageShapeTests(IsolatedTestCase):
     ITEM = {"host": "homenas2", "ident": "smartd", "filter": "host:=homenas2 appname:=smartd severity:in(emerg,alert,crit,err,error)"}
 
     def test_narrowing_filters_pass(self):
@@ -129,7 +130,7 @@ class CoverageShapeTests(unittest.TestCase):
             self.assertIn("must keep the host and the source", supervisor.check_coverage_shape(q, self.ITEM) or "", q)
 
 
-class QuerySafetyTests(unittest.TestCase):
+class QuerySafetyTests(IsolatedTestCase):
     def test_check_query_rejects_pipes_hidden_behind_other_quote_styles(self):
         # a LogsQL a '...' es a `...` szoveget is idezojelnek ismeri: a "bare" ellenorzes ezeken at nem lathatna csovet
         for q in ("host:=h `\"` | stats count() | `\"`", "host:=h '\"' | delete x | '\"'", "host:=h 'a'", "host:=h `a`"):

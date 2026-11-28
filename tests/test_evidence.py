@@ -3,6 +3,7 @@ es a javaslat-nezet figyelem-jelzese / hatasvizsgalata."""
 import os
 import sys
 import unittest
+from _base import IsolatedTestCase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
@@ -26,7 +27,7 @@ def finding(host, ident, level, tmpl):
             "level": level, "tmpl": tmpl, "hits": 2, "baseline": 0}
 
 
-class AttentionTests(unittest.TestCase):
+class AttentionTests(IsolatedTestCase):
     def test_flags_security_and_availability_words_only(self):
         self.assertIn("preauth", evidence.attention([r"Connection closed by authenticating user .* port <N> \[preauth\]"]))
         self.assertTrue(evidence.attention(["Zigbee: allowing new devices to join"]))
@@ -39,7 +40,7 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(len(evidence.attention(["preauth denied refused panic corrupt degraded unreachable"], limit=3)), 3)
 
 
-class EvidenceTests(unittest.TestCase):
+class EvidenceTests(IsolatedTestCase):
     def test_impact_numbers_examples_similar_and_redaction(self):
         pats = [pat("h1", "sshd", "info", "Connection closed by authenticating user root <IP> port <N> [preauth]", 40),
                 pat("h2", "sshd", "info", "Connection closed by authenticating user admin <IP> port <N> [preauth]", 10),
@@ -63,7 +64,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("invalid regex", out[0]["error"])
 
 
-class ApiTests(unittest.TestCase):
+class ApiTests(IsolatedTestCase):
     R = {"Authorization": "Bearer r-token"}
     A = {"Authorization": "Bearer a-token"}
 
